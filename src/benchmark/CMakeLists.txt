@@ -11,5 +11,7 @@ add_executable(benchmark_nam_middle_circuits ${NAM_MIDDLE_CIRCUITS})
 # TODO: Rename them
 file(GLOB_RECURSE ILP_NUM_STAGES "ilp_num_stages.cpp")
 add_executable(benchmark_ilp_num_stages ${ILP_NUM_STAGES})
+file(GLOB_RECURSE SNUQS_NUM_STAGES "heuristic_num_stages.cpp")
+add_executable(benchmark_snuqs_num_stages ${SNUQS_NUM_STAGES})
 file(GLOB_RECURSE DP "dp.cpp")
 add_executable(benchmark_dp ${DP})

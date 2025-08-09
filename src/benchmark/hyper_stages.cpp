@@ -15,7 +15,9 @@ using namespace quartz;
 void get_stages_by_heuristics(
     CircuitSeq *seq, int num_local_qubits,
     std::vector<std::vector<bool>> &local_qubits, int &num_swaps,
-    std::unordered_set<CircuitGate *> &gates_in_hyperstage) {
+    std::unordered_set<CircuitGate *> &gates_in_hyperstage,
+    std::vector<std::vector<int>> &res) {
+  res.clear();
   int num_qubits = seq->get_num_qubits();
   std::unordered_map<CircuitGate *, bool> executed;
   // No initial configuration -- all qubits are global.
@@ -127,12 +129,15 @@ void get_stages_by_heuristics(
       local_qubit[i] = false;
     }
     std::sort(candidate_indices.begin(), candidate_indices.end(), cmp);
+    res.push_back(candidate_indices);
     std::cout << "Stage " << num_stages << ": {";
-    for (int i = 0; i < num_local_qubits; i++) {
-      local_qubit[candidate_indices[i]] = true;
+    for (int i = 0; i < num_qubits; i++) {
       std::cout << candidate_indices[i];
-      if (i < num_local_qubits - 1) {
+      if (i < num_qubits - 1) {
         std::cout << ", ";
+      }
+      if (i < num_local_qubits) {
+        local_qubit[candidate_indices[i]] = true;
       }
     }
     std::cout << "}" << std::endl;
@@ -161,8 +166,6 @@ void get_hyper_stages(
   // No initial configuration -- all qubits are global.
   std::vector<bool> local_qubit(num_qubits, false);
   int num_stages = 0;
-  int iter = 0;
-  std::unordered_set<CircuitGate *> newly_executed_gates;
   while (true) {
     bool all_done = true;
     std::vector<bool> executable(num_qubits, true);
@@ -189,7 +192,6 @@ void get_hyper_stages(
         }
         if (ok) {
           // execute
-          newly_executed_gates.insert(gate.get());
           executed[gate.get()] = true;
         } else {
           // not executable, block the qubits
@@ -199,13 +201,6 @@ void get_hyper_stages(
           }
         }
       }
-    }
-    if (iter > 0) {  // the first and second iteration generate the final list
-                     // of gates that are executed by in the first stage
-      std::unordered_set<CircuitGate *> newly_executed_gates_copy =
-          newly_executed_gates;
-      executed_gates_per_stage.push_back(std::move(newly_executed_gates_copy));
-      newly_executed_gates.clear();
     }
     if (all_done) {
       break;
@@ -276,11 +271,14 @@ void get_hyper_stages(
     std::sort(candidate_indices.begin(), candidate_indices.end(), cmp);
     result.push_back(candidate_indices);
     std::cout << "Stage " << num_stages << ": {";
-    for (int i = 0; i < num_local_qubits; i++) {
-      local_qubit[candidate_indices[i]] = true;
+    for (int i = 0; i < num_qubits; i++) {  // print all qubits, the first
+                                            // num_local_qubits are local qubits
       std::cout << candidate_indices[i];
-      if (i < num_local_qubits - 1) {
+      if (i < num_qubits - 1) {
         std::cout << ", ";
+      }
+      if (i < num_local_qubits) {
+        local_qubit[candidate_indices[i]] = true;
       }
     }
     std::cout << "}" << std::endl;
@@ -292,7 +290,6 @@ void get_hyper_stages(
         }
       }
     }
-    iter++;
   }
   std::cout << num_stages << " stages." << std::endl;
 }
@@ -327,6 +324,8 @@ int main() {
     int num_swaps = 0;
     std::vector<std::vector<int>> heuristics_result;
     std::vector<std::unordered_set<CircuitGate *>> executed_gates_per_stage;
+
+    // first get hyper stages
     get_hyper_stages(seq.get(), num_frozen_qubits, local_qubits_by_heuristics,
                      num_swaps, heuristics_result, executed_gates_per_stage);
     std::cout << "heuristics_result.size(): " << heuristics_result.size()
@@ -338,6 +337,16 @@ int main() {
     fflush(fout);
     fprintf(fout, "\n");
     fflush(fout);
+
+    // then get stages in each hyper stage
+    int num_local_qubits = 28;
+    for (int i = 0; i < heuristics_result.size(); i++) {
+      std::vector<std::vector<int>> stages;
+      std::vector<std::vector<bool>> local_qubits;
+      int num_swaps = 0;
+      get_stages_by_heuristics(seq.get(), num_local_qubits, local_qubits,
+                               num_swaps, executed_gates_per_stage[i], stages);
+    }
   }
 
   fclose(fout);

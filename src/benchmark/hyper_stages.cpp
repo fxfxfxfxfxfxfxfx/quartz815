@@ -12,6 +12,98 @@
 
 using namespace quartz;
 
+// Extracted helper function to compute gate statistics and first unexecuted
+// gate
+static void compute_gate_statistics(
+    CircuitSeq *seq, const std::unordered_map<CircuitGate *, bool> &executed,
+    const std::vector<bool> &local_qubit, std::vector<int> &local_gates,
+    std::vector<int> &global_gates, std::vector<bool> &first_unexecuted_gate) {
+  int num_qubits = seq->get_num_qubits();
+  local_gates.assign(num_qubits, 0);
+  global_gates.assign(num_qubits, 0);
+  first_unexecuted_gate.assign(num_qubits, false);
+
+  bool first = true;
+  for (auto &gate : seq->gates) {
+    if (gate->gate->is_quantum_gate() && !executed.at(gate.get())) {
+      bool local = true;
+      if (!gate->gate->is_diagonal()) {
+        int num_remaining_control_qubits = gate->gate->get_num_control_qubits();
+        for (auto &output : gate->output_wires) {
+          if (output->is_qubit()) {
+            num_remaining_control_qubits--;
+            if (num_remaining_control_qubits < 0 &&
+                !local_qubit[output->index]) {
+              local = false;
+            }
+          }
+        }
+      }
+      int num_remaining_control_qubits = gate->gate->get_num_control_qubits();
+      for (auto &output : gate->output_wires) {
+        if (output->is_qubit()) {
+          num_remaining_control_qubits--;
+          if (local) {
+            local_gates[output->index]++;
+          } else {
+            global_gates[output->index]++;
+          }
+          if (first && num_remaining_control_qubits < 0) {
+            first_unexecuted_gate[output->index] = true;
+          }
+        }
+      }
+      first = false;
+    }
+  }
+}
+
+// Extracted helper function to update executed map and executable vector
+static bool update_executed_and_executable(
+    CircuitSeq *seq,
+    const std::unordered_set<CircuitGate *>
+        *gates_in_hyperstage,  // can be nullptr
+    std::unordered_map<CircuitGate *, bool> &executed,
+    std::vector<bool> &executable, const std::vector<bool> &local_qubit) {
+  bool all_done = true;
+  for (auto &gate : seq->gates) {
+    if (gates_in_hyperstage && gates_in_hyperstage->count(gate.get()) == 0) {
+      continue;  // skip gates not in the hyperstage
+    }
+    if (gate->gate->is_quantum_gate() && !executed[gate.get()]) {
+      bool ok = true;  // indicates if the gate can be executed
+      for (auto &output : gate->output_wires) {
+        if (!executable[output->index]) {
+          ok = false;
+        }
+      }
+      if (!gate->gate->is_diagonal()) {
+        int num_remaining_control_qubits = gate->gate->get_num_control_qubits();
+        for (auto &output : gate->output_wires) {
+          if (output->is_qubit()) {
+            num_remaining_control_qubits--;
+            if (num_remaining_control_qubits < 0 &&
+                !local_qubit[output->index]) {
+              ok = false;
+            }
+          }
+        }
+      }
+      if (ok) {
+        // execute
+        executed[gate.get()] = true;
+      } else {
+        // not executable, block the qubits
+        all_done = false;
+        for (auto &output : gate->output_wires) {
+          executable[output->index] = false;
+        }
+      }
+    }
+  }
+  return all_done;
+}
+
 void get_stages_by_heuristics(
     CircuitSeq *seq, int num_local_qubits,
     std::vector<std::vector<bool>> &local_qubits, int &num_swaps,
@@ -21,100 +113,26 @@ void get_stages_by_heuristics(
   res.clear();
   int num_qubits = seq->get_num_qubits();
   std::unordered_map<CircuitGate *, bool> executed;
-  // No initial configuration -- all qubits are global.
+  for (auto &gate : seq->gates) {
+    executed[gate.get()] = false;
+  }
   std::vector<bool> local_qubit(num_qubits, false);
   int num_stages = 0;
   int iter = 0;
   while (true) {
-    bool all_done = true;
     std::vector<bool> executable(num_qubits, true);
-    for (auto &gate : seq->gates) {
-      if (gates_in_hyperstage.count(gate.get()) == 0) {
-        continue;  // skip gates not in the hyperstage
-      }
-      if (gate->gate->is_quantum_gate() && !executed[gate.get()]) {
-        bool ok = true;  // indicates if the gate can be executed
-        for (auto &output : gate->output_wires) {
-          if (!executable[output->index]) {
-            ok = false;
-          }
-        }
-        if (!gate->gate->is_diagonal()) {
-          int num_remaining_control_qubits =
-              gate->gate->get_num_control_qubits();
-          for (auto &output : gate->output_wires) {
-            if (output->is_qubit()) {
-              num_remaining_control_qubits--;
-              if (num_remaining_control_qubits < 0 &&
-                  !local_qubit[output->index]) {
-                ok = false;
-              }
-            }
-          }
-        }
-        if (ok) {
-          // execute
-          executed[gate.get()] = true;
-        } else {
-          // not executable, block the qubits
-          all_done = false;
-          for (auto &output : gate->output_wires) {
-            executable[output->index] = false;
-          }
-        }
-      }
-    }
+    bool all_done = update_executed_and_executable(
+        seq, &gates_in_hyperstage, executed, executable, local_qubit);
     if (all_done) {
       break;
     }
     num_stages++;
-    // count global and local gates
-    std::vector<bool> first_unexecuted_gate(
-        num_qubits, false);  // for tiebreaker, means that the first unexecuted
-                             // gate on this qubit
-    // how many local and global gates on each qubit
-    std::vector<int> local_gates(num_qubits, 0);
-    std::vector<int> global_gates(num_qubits, 0);
-    // how many local and global gates on each qubit
+    std::vector<bool> first_unexecuted_gate;
+    std::vector<int> local_gates, global_gates;
+    compute_gate_statistics(seq, executed, local_qubit, local_gates,
+                            global_gates, first_unexecuted_gate);
 
-    bool first = true;
-    for (auto &gate : seq->gates) {
-      if (gate->gate->is_quantum_gate() && !executed[gate.get()]) {
-        bool local = true;
-        if (!gate->gate->is_diagonal()) {
-          int num_remaining_control_qubits =
-              gate->gate->get_num_control_qubits();
-          for (auto &output : gate->output_wires) {
-            if (output->is_qubit()) {
-              num_remaining_control_qubits--;
-              if (num_remaining_control_qubits < 0 &&
-                  !local_qubit[output->index]) {
-                local = false;
-              }
-            }
-          }
-        }
-        int num_remaining_control_qubits = gate->gate->get_num_control_qubits();
-        for (auto &output : gate->output_wires) {
-          if (output->is_qubit()) {
-            num_remaining_control_qubits--;
-            if (local) {
-              local_gates[output->index]++;
-            } else {
-              global_gates[output->index]++;
-            }
-            if (first && num_remaining_control_qubits < 0) {
-              first_unexecuted_gate[output->index] = true;
-            }
-          }
-        }
-        first = false;
-      }
-    }
     auto cmp = [&](int a, int b) {
-      // If this is the first stage in current hyper stage, we will make sure
-      // the frozen qubits in previous hyper stage to be local qubits in this
-      // stage
       if (iter == 0 && prev_frozen_qubits.count(a) &&
           prev_frozen_qubits.count(b)) {
         return a < b;  // both are frozen, use index as tiebreaker
@@ -140,7 +158,6 @@ void get_stages_by_heuristics(
       if (local_gates[a] != local_gates[b]) {
         return local_gates[a] > local_gates[b];
       }
-      // Use the qubit index as a final tiebreaker.
       return a < b;
     };
     std::vector<int> candidate_indices(num_qubits, 0);
@@ -184,92 +201,24 @@ void get_hyper_stages(
   int num_qubits = seq->get_num_qubits();
   int num_local_qubits = num_qubits - num_frozen_qubits;
   std::unordered_map<CircuitGate *, bool> executed;
-  // No initial configuration -- all qubits are global.
+  for (auto &gate : seq->gates) {
+    executed[gate.get()] = false;
+  }
   std::vector<bool> local_qubit(num_qubits, false);
   int num_stages = 0;
   while (true) {
-    bool all_done = true;
     std::vector<bool> executable(num_qubits, true);
-    for (auto &gate : seq->gates) {
-      if (gate->gate->is_quantum_gate() && !executed[gate.get()]) {
-        bool ok = true;  // indicates if the gate can be executed
-        for (auto &output : gate->output_wires) {
-          if (!executable[output->index]) {
-            ok = false;
-          }
-        }
-        if (!gate->gate->is_diagonal()) {
-          int num_remaining_control_qubits =
-              gate->gate->get_num_control_qubits();
-          for (auto &output : gate->output_wires) {
-            if (output->is_qubit()) {
-              num_remaining_control_qubits--;
-              if (num_remaining_control_qubits < 0 &&
-                  !local_qubit[output->index]) {
-                ok = false;
-              }
-            }
-          }
-        }
-        if (ok) {
-          // execute
-          executed[gate.get()] = true;
-        } else {
-          // not executable, block the qubits
-          all_done = false;
-          for (auto &output : gate->output_wires) {
-            executable[output->index] = false;
-          }
-        }
-      }
-    }
+    bool all_done = update_executed_and_executable(seq, nullptr, executed,
+                                                   executable, local_qubit);
     if (all_done) {
       break;
     }
     num_stages++;
-    // count global and local gates
-    std::vector<bool> first_unexecuted_gate(
-        num_qubits, false);  // for tiebreaker, means that the first unexecuted
-                             // gate on this qubit
-    // how many local and global gates on each qubit
-    std::vector<int> local_gates(num_qubits, 0);
-    std::vector<int> global_gates(num_qubits, 0);
-    // how many local and global gates on each qubit
+    std::vector<bool> first_unexecuted_gate;
+    std::vector<int> local_gates, global_gates;
+    compute_gate_statistics(seq, executed, local_qubit, local_gates,
+                            global_gates, first_unexecuted_gate);
 
-    bool first = true;
-    for (auto &gate : seq->gates) {
-      if (gate->gate->is_quantum_gate() && !executed[gate.get()]) {
-        bool local = true;
-        if (!gate->gate->is_diagonal()) {
-          int num_remaining_control_qubits =
-              gate->gate->get_num_control_qubits();
-          for (auto &output : gate->output_wires) {
-            if (output->is_qubit()) {
-              num_remaining_control_qubits--;
-              if (num_remaining_control_qubits < 0 &&
-                  !local_qubit[output->index]) {
-                local = false;
-              }
-            }
-          }
-        }
-        int num_remaining_control_qubits = gate->gate->get_num_control_qubits();
-        for (auto &output : gate->output_wires) {
-          if (output->is_qubit()) {
-            num_remaining_control_qubits--;
-            if (local) {
-              local_gates[output->index]++;
-            } else {
-              global_gates[output->index]++;
-            }
-            if (first && num_remaining_control_qubits < 0) {
-              first_unexecuted_gate[output->index] = true;
-            }
-          }
-        }
-        first = false;
-      }
-    }
     auto cmp = [&](int a, int b) {
       if (first_unexecuted_gate[b])
         return false;
@@ -281,7 +230,6 @@ void get_hyper_stages(
       if (local_gates[a] != local_gates[b]) {
         return local_gates[a] > local_gates[b];
       }
-      // Use the qubit index as a final tiebreaker.
       return a < b;
     };
     std::vector<int> candidate_indices(num_qubits, 0);
@@ -292,8 +240,7 @@ void get_hyper_stages(
     std::sort(candidate_indices.begin(), candidate_indices.end(), cmp);
     result.push_back(candidate_indices);
     std::cout << "Stage " << num_stages << ": {";
-    for (int i = 0; i < num_qubits; i++) {  // print all qubits, the first
-                                            // num_local_qubits are local qubits
+    for (int i = 0; i < num_qubits; i++) {
       std::cout << candidate_indices[i];
       if (i < num_qubits - 1) {
         std::cout << ", ";
@@ -331,7 +278,6 @@ void get_hyper_stages(
         if (ok) {
           executed_this_stage.insert(gate.get());
         } else {
-          // not executable, block the qubits
           for (auto &output : gate->output_wires) {
             executable_for_collect_gates[output->index] = false;
           }

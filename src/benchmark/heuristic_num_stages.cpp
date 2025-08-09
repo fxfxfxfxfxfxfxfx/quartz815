@@ -26,7 +26,7 @@ int num_stages_by_heuristics(CircuitSeq *seq, int num_local_qubits,
     std::vector<bool> executable(num_qubits, true);
     for (auto &gate : seq->gates) {
       if (gate->gate->is_quantum_gate() && !executed[gate.get()]) {
-        bool ok = true;
+        bool ok = true;  // indicates if the gate can be executed
         for (auto &output : gate->output_wires) {
           if (!executable[output->index]) {
             ok = false;
@@ -62,9 +62,14 @@ int num_stages_by_heuristics(CircuitSeq *seq, int num_local_qubits,
     }
     num_stages++;
     // count global and local gates
-    std::vector<bool> first_unexecuted_gate(num_qubits, false);
+    std::vector<bool> first_unexecuted_gate(
+        num_qubits, false);  // for tiebreaker, means that the first unexecuted
+                             // gate on this qubit
+    // how many local and global gates on each qubit
     std::vector<int> local_gates(num_qubits, 0);
     std::vector<int> global_gates(num_qubits, 0);
+    // how many local and global gates on each qubit
+
     bool first = true;
     for (auto &gate : seq->gates) {
       if (gate->gate->is_quantum_gate() && !executed[gate.get()]) {

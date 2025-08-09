@@ -64,3 +64,9 @@ build/*
 
 # others
 .DS_Store
+
+# clang
+.cache
+
+# misc
+heuristic_result.csv

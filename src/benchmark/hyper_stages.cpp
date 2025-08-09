@@ -16,7 +16,8 @@ void get_stages_by_heuristics(
     CircuitSeq *seq, int num_local_qubits,
     std::vector<std::vector<bool>> &local_qubits, int &num_swaps,
     std::unordered_set<CircuitGate *> &gates_in_hyperstage,
-    std::vector<std::vector<int>> &res) {
+    std::vector<std::vector<int>> &res,
+    std::unordered_set<int> &frozen_qubits) {
   res.clear();
   int num_qubits = seq->get_num_qubits();
   std::unordered_map<CircuitGate *, bool> executed;
@@ -110,6 +111,12 @@ void get_stages_by_heuristics(
       }
     }
     auto cmp = [&](int a, int b) {
+      if (frozen_qubits.count(a) && frozen_qubits.count(b))
+        return a < b;  // both are frozen, use index as tiebreaker
+      if (frozen_qubits.count(a))
+        return false;  // a is frozen, b is not, b comes first
+      if (frozen_qubits.count(b))
+        return true;  // b is frozen, a is not, a comes first
       if (first_unexecuted_gate[b])
         return false;
       if (first_unexecuted_gate[a])
@@ -282,6 +289,47 @@ void get_hyper_stages(
       }
     }
     std::cout << "}" << std::endl;
+
+    // Collect executable gates in this hyper stage
+    std::vector<bool> executable_for_collect_gates(num_qubits, true);
+    std::unordered_set<CircuitGate *> executed_this_stage;
+    for (auto &gate : seq->gates) {
+      if (gate->gate->is_quantum_gate() && !executed[gate.get()]) {
+        bool ok = true;
+        for (auto &output : gate->output_wires) {
+          if (!executable_for_collect_gates[output->index]) {
+            ok = false;
+          }
+        }
+        if (!gate->gate->is_diagonal()) {
+          int num_remaining_control_qubits =
+              gate->gate->get_num_control_qubits();
+          for (auto &output : gate->output_wires) {
+            if (output->is_qubit()) {
+              num_remaining_control_qubits--;
+              if (num_remaining_control_qubits < 0 &&
+                  !local_qubit[output->index]) {
+                ok = false;
+              }
+            }
+          }
+        }
+        if (ok) {
+          executed_this_stage.insert(gate.get());
+        } else {
+          // not executable, block the qubits
+          for (auto &output : gate->output_wires) {
+            executable_for_collect_gates[output->index] = false;
+          }
+        }
+      }
+    }
+    if (executed_this_stage.empty()) {
+      std::cout << "executed_this_stage.size(): "
+                << (int)executed_this_stage.size() << std::endl;
+    }
+    executed_gates_per_stage.push_back(std::move(executed_this_stage));
+
     local_qubits.push_back(local_qubit);
     if (num_stages != 1) {
       for (int i = 0; i < num_local_qubits; i++) {
@@ -305,7 +353,8 @@ int main() {
   FILE *fout = fopen("heuristic_result.csv", "w");
   // 31 or 42 total qubits, 0-23 global qubits
   // std::vector<int> num_qubits = {28, 29, 28, 29, 31, 32, 33,
-  std::vector<int> num_qubits = {30, 32, 34, 36, 38, 40, 42, 44, 46, 48};
+  // std::vector<int> num_qubits = {30, 32, 34, 36, 38, 40, 42, 44, 46, 48};
+  std::vector<int> num_qubits = {30};
   int num_frozen_qubits = 1;
   constexpr int kMaxGlobalQubitsFor31 = 16;
   std::vector<int> num_global_qubits;
@@ -322,30 +371,36 @@ int main() {
     std::vector<int> n_swaps;
     std::vector<std::vector<bool>> local_qubits_by_heuristics;
     int num_swaps = 0;
-    std::vector<std::vector<int>> heuristics_result;
+    std::vector<std::vector<int>> hyper_stages;
     std::vector<std::unordered_set<CircuitGate *>> executed_gates_per_stage;
 
     // first get hyper stages
     get_hyper_stages(seq.get(), num_frozen_qubits, local_qubits_by_heuristics,
-                     num_swaps, heuristics_result, executed_gates_per_stage);
-    std::cout << "heuristics_result.size(): " << heuristics_result.size()
+                     num_swaps, hyper_stages, executed_gates_per_stage);
+    std::cout << "heuristics_result.size(): " << hyper_stages.size()
               << std::endl;
     std::cout << "executed_gates_per_stage.size(): "
               << executed_gates_per_stage.size() << std::endl;
     n_swaps.push_back(num_swaps);
-    fprintf(fout, "%d, ", (int)heuristics_result.size());
+    fprintf(fout, "%d, ", (int)hyper_stages.size());
     fflush(fout);
     fprintf(fout, "\n");
     fflush(fout);
 
     // then get stages in each hyper stage
     int num_local_qubits = 28;
-    for (int i = 0; i < heuristics_result.size(); i++) {
+    for (int i = 0; i < hyper_stages.size(); i++) {
       std::vector<std::vector<int>> stages;
       std::vector<std::vector<bool>> local_qubits;
       int num_swaps = 0;
+      // Get the last `frozen_qubits` qubits from heuristics_result[i]
+      std::unordered_set<int> frozen_qubits;
+      for (int j = 0; j < num_frozen_qubits; j++) {
+        frozen_qubits.insert(hyper_stages[i][num_q - 1 - j]);
+      }
       get_stages_by_heuristics(seq.get(), num_local_qubits, local_qubits,
-                               num_swaps, executed_gates_per_stage[i], stages);
+                               num_swaps, executed_gates_per_stage[i], stages,
+                               frozen_qubits);
     }
   }
 

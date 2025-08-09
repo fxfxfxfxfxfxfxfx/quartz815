@@ -234,6 +234,31 @@ std::vector<Schedule> get_schedules_with_ilp(
     const std::string &cache_file_name_prefix = "", int answer_start_with = 1);
 
 /**
+ * Compute the qubit layout using two-level ILP.
+ * @param sequence The entire circuit sequence.
+ * @param num_local_qubits The number of local qubits per device.
+ * @param num_frozen_qubits The number of frozen qubits per device.
+ * @param ctx The Context object.
+ * @param interpreter The Python interpreter.
+ * @param answer_start_with We know that the number of stages is at least this
+ * number (default is 1). A larger number, if guaranteed to be correct,
+ * may accelerate this function.
+ * @return The qubit layout for each stage.
+ */
+std::vector<std::vector<int>> compute_qubit_layout_with_hyper_stage_heuristic(
+    const CircuitSeq &sequence, int num_local_qubits, int num_frozen_qubits,
+    Context *ctx, PythonInterpreter *interpreter, int answer_start_with = 1);
+
+/**
+ * Get schedules using the hyper-stage heuristic
+ */
+std::vector<Schedule> get_schedules_with_hyper_stage_heuristic(
+    const CircuitSeq &sequence, int num_local_qubits, int num_frozen_qubits,
+    const KernelCost &kernel_cost, Context *ctx, PythonInterpreter *interpreter,
+    bool attach_single_qubit_gates, int max_num_dp_states = 500,
+    const std::string &cache_file_name_prefix = "", int answer_start_with = 1);
+
+/**
  * Verify the schedule by checking the well-formedness of each kernel and then
  * random testing an input state and running the simulation.
  * If |random_test_times| > 0:

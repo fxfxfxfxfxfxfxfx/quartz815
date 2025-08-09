@@ -2634,6 +2634,193 @@ compute_local_qubits_with_ilp(const CircuitSeq &sequence, int num_local_qubits,
   }
 }
 
+std::vector<std::vector<int>> compute_qubit_layout_with_hyper_stage_heuristic(
+    const CircuitSeq &sequence, int num_local_qubits, int num_frozen_qubits,
+    Context *ctx, PythonInterpreter *interpreter, int answer_start_with) {
+  const int num_qubits = sequence.get_num_qubits();
+  const int num_gates = sequence.get_num_gates();
+  if (num_qubits == num_local_qubits) {
+    std::vector<int> result(num_qubits);
+    for (int i = 0; i < num_qubits; i++) {
+      result[i] = i;
+    }
+    return {result};
+  }
+  std::vector<std::vector<int>> result;
+  const int num_global_qubits =
+      num_qubits - num_local_qubits - num_frozen_qubits;
+  assert(num_global_qubits >= 0);
+
+  std::vector<std::vector<int>> circuit_gate_qubits;
+  std::vector<int> circuit_gate_executable_type;
+  std::unordered_map<CircuitGate *, int> gate_index;
+  std::vector<std::vector<int>> out_gate(num_gates);
+  circuit_gate_qubits.reserve(num_gates);
+  circuit_gate_executable_type.reserve(num_gates);
+  gate_index.reserve(num_gates);
+  for (int i = 0; i < num_gates; i++) {
+    circuit_gate_qubits.push_back(sequence.gates[i]->get_qubit_indices());
+    int executable_type;
+    // 0 is always executable
+    // 1 is the target qubits must be local-only
+    // 2 is local-only
+    if (sequence.gates[i]->gate->get_num_qubits() == 1) {
+      if (sequence.gates[i]->gate->is_sparse()) {
+        // A single-qubit gate is always executable if it is "sparse".
+        executable_type = 0;
+      } else {
+        // Otherwise, we require the qubit to be local-only.
+        executable_type = 2;
+      }
+    } else if (sequence.gates[i]->gate->get_num_control_qubits() > 0) {
+      if (sequence.gates[i]->gate->is_symmetric()) {
+        // A controlled gate is always executable if every qubit can be a
+        // control qubit.
+        executable_type = 0;
+      } else {
+        // The target qubits must be local-only.
+        // We assume there is only 1 target qubit in the Python code.
+        assert(sequence.gates[i]->gate->get_num_control_qubits() ==
+               sequence.gates[i]->gate->get_num_qubits() - 1);
+        executable_type = 1;
+      }
+    } else {
+      // For all non-controlled multi-qubit gates,
+      // we require all qubits to be local-only.
+      // Note: although the SWAP gate can be executed globally,
+      // it cannot be executed when it's partial global and partial local,
+      // so we restrict it to be local-only here.
+      executable_type = 2;
+    }
+    circuit_gate_executable_type.push_back(executable_type);
+    gate_index[sequence.gates[i].get()] = i;
+  }
+  for (int i = 0; i < num_gates; i++) {
+    for (const auto &output_wire : sequence.gates[i]->output_wires) {
+      for (const auto &output_gate : output_wire->output_gates) {
+        out_gate[i].push_back(gate_index[output_gate]);
+      }
+    }
+  }
+  for (int num_iterations = answer_start_with; true; num_iterations++) {
+    // TODO: make global cost factor configurable
+    result = interpreter->solve_global_ilp(
+        circuit_gate_qubits, circuit_gate_executable_type, out_gate, num_qubits,
+        num_local_qubits, num_global_qubits, 3, num_iterations);
+    if (!result.empty()) {
+      break;
+    }
+  }
+  std::vector<std::vector<int>> result_layout;
+  result_layout.reserve(result.size());
+  for (const auto &current_stage : result) {
+    std::vector<bool> is_local(num_qubits, false);
+    std::vector<bool> is_global(num_qubits, false);
+
+    for (int i = 0; i < num_local_qubits; i++) {
+      is_local[current_stage[i]] = true;
+    }
+    for (int i = num_qubits - num_global_qubits; i < num_qubits; i++) {
+      is_global[current_stage[i]] = true;
+    }
+
+    if (result_layout.empty()) {
+      // first stage
+      result_layout.emplace_back(current_stage);
+      continue;
+    }
+    auto &previous_layout = result_layout.back();
+    std::vector<int> current_stage_layout = previous_layout;
+    std::deque<int> non_local_to_local_swaps;
+    for (int i = num_qubits - 1; i >= num_qubits - num_global_qubits; i--) {
+      if (is_local[previous_layout[i]]) {
+        // global-local swap
+        non_local_to_local_swaps.push_front(i);
+      }
+    }
+    for (int i = num_qubits - num_global_qubits - 1; i >= num_local_qubits;
+         i--) {
+      if (is_local[previous_layout[i]]) {
+        // regional-local swap
+        non_local_to_local_swaps.push_front(i);
+      }
+    }
+
+    // Find non-intersecting swaps to approximate the qubit set change.
+    int swap_loc_min = num_local_qubits - (int)non_local_to_local_swaps.size();
+    int swap_loc_max = num_local_qubits - 1;
+    while (swap_loc_min <= swap_loc_max) {
+      // Find the next non-local qubit that is already in the swap region.
+      // If the lowest one should be global but the highest one should be
+      // regional, swap them.
+      while (swap_loc_min <= swap_loc_max &&
+             !is_global[current_stage_layout[swap_loc_min]]) {
+        swap_loc_min++;
+      }
+      while (swap_loc_min <= swap_loc_max &&
+             (is_local[current_stage_layout[swap_loc_max]] ||
+              is_global[current_stage_layout[swap_loc_max]])) {
+        swap_loc_max--;
+      }
+      if (swap_loc_min <= swap_loc_max) {
+        assert(swap_loc_min != swap_loc_max);
+        std::swap(current_stage_layout[swap_loc_min],
+                  current_stage_layout[swap_loc_max]);
+        swap_loc_min++;
+        swap_loc_max--;
+      }
+    }
+    swap_loc_min = num_local_qubits - (int)non_local_to_local_swaps.size();
+    swap_loc_max = num_local_qubits - 1;
+    std::deque<int> remaining_local_swap_locations;
+    for (int i = swap_loc_min; i <= swap_loc_max; i++) {
+      if (is_local[current_stage_layout[i]]) {
+        // These local qubits needs to be swapped out from these most
+        // significant bits.
+        remaining_local_swap_locations.push_back(i);
+      }
+    }
+    for (int i = 0; i < swap_loc_min; i++) {
+      if (!is_local[current_stage_layout[i]]) {
+        if (is_global[current_stage_layout[i]]) {
+          // local-global swap, swap as far as possible
+          std::swap(
+              current_stage_layout[i],
+              current_stage_layout[remaining_local_swap_locations.back()]);
+          remaining_local_swap_locations.pop_back();
+        } else {
+          // local-regional swap, swap as close as possible
+          std::swap(
+              current_stage_layout[i],
+              current_stage_layout[remaining_local_swap_locations.front()]);
+          remaining_local_swap_locations.pop_front();
+        }
+      }
+    }
+    // Perform the local-to-non-local swaps.
+    for (int i = swap_loc_min; i <= swap_loc_max; i++) {
+      std::swap(
+          current_stage_layout[i],
+          current_stage_layout[non_local_to_local_swaps[i - swap_loc_min]]);
+    }
+    // Check if the approximation is good.
+    int num_global_qubits_not_global = 0;
+    for (int i = num_qubits - num_global_qubits; i < num_qubits; i++) {
+      if (!is_global[current_stage_layout[i]]) {
+        num_global_qubits_not_global++;
+      }
+    }
+    if (num_global_qubits_not_global > 0) {
+      std::cerr << num_global_qubits_not_global
+                << " qubits cannot become global efficiently in this stage."
+                << std::endl;
+    }
+    assert((int)current_stage_layout.size() == num_qubits);
+    result_layout.emplace_back(std::move(current_stage_layout));
+  }
+  return result_layout;
+}
+
 std::vector<std::vector<int>> compute_qubit_layout_with_ilp(
     const CircuitSeq &sequence, int num_local_qubits, int num_regional_qubits,
     Context *ctx, PythonInterpreter *interpreter, int answer_start_with) {
@@ -2837,6 +3024,37 @@ std::vector<Schedule> get_schedules_with_ilp(
   auto t_start = std::chrono::steady_clock::now();
   auto qubit_layout = compute_qubit_layout_with_ilp(
       sequence, num_local_qubits, num_regional_qubits, ctx, interpreter,
+      answer_start_with);
+  auto result = get_schedules(sequence, num_local_qubits, qubit_layout,
+                              kernel_cost, ctx, attach_single_qubit_gates,
+                              max_num_dp_states, cache_file_name_prefix);
+  auto t_end = std::chrono::steady_clock::now();
+  std::cout << "Computed and cached schedule " << cache_file_name_prefix
+            << ".schedule in "
+            << (double)std::chrono::duration_cast<std::chrono::milliseconds>(
+                   t_end - t_start)
+                       .count() /
+                   1000.0
+            << " seconds." << std::endl;
+  return result;
+}
+
+std::vector<Schedule> get_schedules_with_hyper_stage_heuristic(
+    const CircuitSeq &sequence, int num_local_qubits, int num_frozen_qubits,
+    const KernelCost &kernel_cost, Context *ctx, PythonInterpreter *interpreter,
+    bool attach_single_qubit_gates, int max_num_dp_states,
+    const std::string &cache_file_name_prefix, int answer_start_with) {
+  if (std::filesystem::exists(cache_file_name_prefix + ".schedule")) {
+    std::cout << "Use cached schedule " << cache_file_name_prefix << ".schedule"
+              << std::endl;
+    // cached
+    return get_schedules(sequence, num_local_qubits, {}, kernel_cost, ctx,
+                         attach_single_qubit_gates, max_num_dp_states,
+                         cache_file_name_prefix);
+  }
+  auto t_start = std::chrono::steady_clock::now();
+  auto qubit_layout = compute_qubit_layout_with_ilp(
+      sequence, num_local_qubits, num_frozen_qubits, ctx, interpreter,
       answer_start_with);
   auto result = get_schedules(sequence, num_local_qubits, qubit_layout,
                               kernel_cost, ctx, attach_single_qubit_gates,

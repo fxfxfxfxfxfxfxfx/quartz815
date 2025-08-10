@@ -69,4 +69,4 @@ build/*
 .cache
 
 # misc
-heuristic_result.csv
+*.csv

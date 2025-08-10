@@ -2827,8 +2827,11 @@ static void get_hyper_stages(
   int num_qubits = seq->get_num_qubits();
   int num_local_qubits = num_qubits - num_frozen_qubits;
   std::unordered_map<CircuitGate *, bool> executed;
+  std::unordered_map<CircuitGate *, bool> executed_for_gates_collection;
+  ;
   for (auto &gate : seq->gates) {
     executed[gate.get()] = false;
+    executed_for_gates_collection[gate.get()] = false;
   }
   std::vector<bool> local_qubit(num_qubits, false);
   int num_stages = 0;
@@ -2875,7 +2878,8 @@ static void get_hyper_stages(
     std::vector<bool> executable_for_collect_gates(num_qubits, true);
     std::unordered_set<CircuitGate *> executed_this_stage;
     for (auto &gate : seq->gates) {
-      if (gate->gate->is_quantum_gate() && !executed[gate.get()]) {
+      if (gate->gate->is_quantum_gate() &&
+          !executed_for_gates_collection[gate.get()]) {
         bool ok = true;
         for (auto &output : gate->output_wires) {
           if (!executable_for_collect_gates[output->index]) {
@@ -2897,6 +2901,7 @@ static void get_hyper_stages(
         }
         if (ok) {
           executed_this_stage.insert(gate.get());
+          executed_for_gates_collection[gate.get()] = true;
         } else {
           for (auto &output : gate->output_wires) {
             executable_for_collect_gates[output->index] = false;

@@ -7,11 +7,26 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
+#include <fstream>
+#include <future>
 #include <iostream>
+#include <signal.h>
+#include <stdexcept>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <thread>
+#include <unistd.h>
 #include <unordered_map>
 #include <vector>
 
 using namespace quartz;
+
+// Timeout for ILP in seconds (change this value for testing)
+constexpr int ILP_TIMEOUT_SECONDS = 10;  // e.g., 10 seconds for testing
+
+// Temporary file for process-based result passing
+const char *ILP_RESULT_FILE = "ilp_result.tmp";
 
 // const std::string QASM_FILE_PREFIX = "./circuit/qiskit-random/rqc_";
 const std::string QASM_FILE_PREFIX = "./circuit/qiskit-random/rqc_depth_1";
@@ -149,6 +164,80 @@ int num_stages_by_heuristics(CircuitSeq *seq, int num_local_qubits,
   return num_stages;
 }
 
+// Helper function to serialize result to file
+void write_ilp_result(const std::vector<std::vector<int>> &result) {
+  std::ofstream ofs(ILP_RESULT_FILE, std::ios::binary | std::ios::trunc);
+  int n = result.size();
+  ofs.write(reinterpret_cast<const char *>(&n), sizeof(int));
+  for (const auto &vec : result) {
+    int m = vec.size();
+    ofs.write(reinterpret_cast<const char *>(&m), sizeof(int));
+    ofs.write(reinterpret_cast<const char *>(vec.data()), m * sizeof(int));
+  }
+  ofs.close();
+}
+
+// Helper function to deserialize result from file
+std::vector<std::vector<int>> read_ilp_result() {
+  std::vector<std::vector<int>> result;
+  std::ifstream ifs(ILP_RESULT_FILE, std::ios::binary);
+  if (!ifs)
+    return result;
+  int n = 0;
+  ifs.read(reinterpret_cast<char *>(&n), sizeof(int));
+  for (int i = 0; i < n; ++i) {
+    int m = 0;
+    ifs.read(reinterpret_cast<char *>(&m), sizeof(int));
+    std::vector<int> vec(m);
+    ifs.read(reinterpret_cast<char *>(vec.data()), m * sizeof(int));
+    result.push_back(std::move(vec));
+  }
+  ifs.close();
+  return result;
+}
+
+// Helper function to run compute_qubit_layout_with_ilp in a separate process
+template <typename... Args>
+std::optional<std::vector<std::vector<int>>>
+run_with_timeout_process(std::chrono::seconds timeout, Args &&...args) {
+  // Remove old result file if exists
+  std::remove(ILP_RESULT_FILE);
+
+  pid_t pid = fork();
+  if (pid < 0) {
+    std::cerr << "fork() failed!" << std::endl;
+    return std::nullopt;
+  }
+  if (pid == 0) {
+    // Child process
+    auto result = compute_qubit_layout_with_ilp(std::forward<Args>(args)...);
+    write_ilp_result(result);
+    _exit(0);
+  } else {
+    // Parent process
+    int status = 0;
+    int waited = 0;
+    while (waited < timeout.count()) {
+      pid_t result = waitpid(pid, &status, WNOHANG);
+      if (result == 0) {
+        sleep(1);
+        ++waited;
+      } else {
+        break;
+      }
+    }
+    if (waited >= timeout.count()) {
+      kill(pid, SIGKILL);
+      waitpid(pid, &status, 0);
+      return std::nullopt;
+    } else {
+      // Read result from file
+      auto result = read_ilp_result();
+      return result;
+    }
+  }
+}
+
 int main() {
   auto start = std::chrono::steady_clock::now();
   init_python_interpreter();
@@ -160,8 +249,8 @@ int main() {
   FILE *fout = fopen("heuristic_result.csv", "w");
   // 31 or 42 total qubits, 0-23 global qubits
   // std::vector<int> num_qubits = {28, 29, 28, 29, 31, 32, 33,
-  // std::vector<int> num_qubits = {30, 32, 34, 36, 38, 40, 42, 44, 46, 48};
-  std::vector<int> num_qubits = {30, 32};
+  std::vector<int> num_qubits = {30, 32, 34, 36, 38, 40, 42, 44, 46, 48};
+  // std::vector<int> num_qubits = {30, 32};
   int num_local_qubits = 28;
 
   // Test staging by heuristics
@@ -212,28 +301,41 @@ int main() {
     std::vector<int> n_swaps;
     std::vector<std::vector<int>> local_qubits;
     int num_global_q = num_q - num_local_qubits;
-    local_qubits = compute_qubit_layout_with_ilp(
-        *seq, num_local_qubits, std::min(2, num_q - num_local_qubits), &ctx,
-        &interpreter, answer_start_with);
-    int ilp_result = (int)local_qubits.size();
+
+    // Run compute_qubit_layout_with_ilp in a separate process with a timeout
+    std::optional<std::vector<std::vector<int>>> ilp_result_opt =
+        run_with_timeout_process(std::chrono::seconds(ILP_TIMEOUT_SECONDS),
+                                 *seq, num_local_qubits,
+                                 std::min(2, num_q - num_local_qubits), &ctx,
+                                 &interpreter, answer_start_with);
+
+    int ilp_result = -1;
     int num_swaps = 0;
-    std::vector<bool> prev_local(num_q, false);
-    for (int j = 0; j < ilp_result; j++) {
-      std::cout << "Stage " << j << ": ";
-      local_qubits[j].resize(num_q - num_global_q);
-      for (int k : local_qubits[j]) {
-        std::cout << k << " ";
-        if (j > 0) {
-          if (!prev_local[k]) {
-            num_swaps++;
+    if (ilp_result_opt.has_value() && !ilp_result_opt.value().empty()) {
+      local_qubits = ilp_result_opt.value();
+      ilp_result = (int)local_qubits.size();
+      std::vector<bool> prev_local(num_q, false);
+      for (int j = 0; j < ilp_result; j++) {
+        std::cout << "Stage " << j << ": ";
+        local_qubits[j].resize(num_q - num_global_q);
+        for (int k : local_qubits[j]) {
+          std::cout << k << " ";
+          if (j > 0) {
+            if (!prev_local[k]) {
+              num_swaps++;
+            }
           }
         }
+        prev_local.assign(num_q, false);
+        for (int k : local_qubits[j]) {
+          prev_local[k] = true;
+        }
+        std::cout << std::endl;
       }
-      prev_local.assign(num_q, false);
-      for (int k : local_qubits[j]) {
-        prev_local[k] = true;
-      }
-      std::cout << std::endl;
+    } else {
+      std::cerr << "Error: compute_qubit_layout_with_ilp exceeded timeout ("
+                << ILP_TIMEOUT_SECONDS << " seconds)." << std::endl;
+      ilp_result = -1;
     }
     n_swaps.push_back(num_swaps);
     fprintf(fout, "%d, ", ilp_result);
@@ -252,28 +354,40 @@ int main() {
     std::vector<int> n_swaps;
     std::vector<std::vector<int>> local_qubits;
     int num_global_q = num_q - num_local_qubits;
-    local_qubits = compute_qubit_layout_with_ilp(
-        *seq, num_q - 1, 0, &ctx, &interpreter, answer_start_with);
 
-    int ilp_result = (int)local_qubits.size();
+    // Run compute_qubit_layout_with_ilp in a separate process with a timeout
+    std::optional<std::vector<std::vector<int>>> ilp_result_opt =
+        run_with_timeout_process(std::chrono::seconds(ILP_TIMEOUT_SECONDS),
+                                 *seq, num_q - 1, 0, &ctx, &interpreter,
+                                 answer_start_with);
+
+    int ilp_result = -1;
     int num_swaps = 0;
-    std::vector<bool> prev_local(num_q, false);
-    for (int j = 0; j < ilp_result; j++) {
-      std::cout << "Stage " << j << ": ";
-      local_qubits[j].resize(num_q - num_global_q);
-      for (int k : local_qubits[j]) {  // print the local qubits
-        std::cout << k << " ";
-        if (j > 0) {
-          if (!prev_local[k]) {
-            num_swaps++;
+    if (ilp_result_opt.has_value() && !ilp_result_opt.value().empty()) {
+      local_qubits = ilp_result_opt.value();
+      ilp_result = (int)local_qubits.size();
+      std::vector<bool> prev_local(num_q, false);
+      for (int j = 0; j < ilp_result; j++) {
+        std::cout << "Stage " << j << ": ";
+        local_qubits[j].resize(num_q - num_global_q);
+        for (int k : local_qubits[j]) {  // print the local qubits
+          std::cout << k << " ";
+          if (j > 0) {
+            if (!prev_local[k]) {
+              num_swaps++;
+            }
           }
         }
+        prev_local.assign(num_q, false);
+        for (int k : local_qubits[j]) {
+          prev_local[k] = true;
+        }
+        std::cout << std::endl;
       }
-      prev_local.assign(num_q, false);
-      for (int k : local_qubits[j]) {
-        prev_local[k] = true;
-      }
-      std::cout << std::endl;
+    } else {
+      std::cerr << "Error: compute_qubit_layout_with_ilp exceeded timeout ("
+                << ILP_TIMEOUT_SECONDS << " seconds)." << std::endl;
+      ilp_result = -1;
     }
     n_swaps.push_back(num_swaps);
     fprintf(fout, "%d, ", ilp_result);
@@ -284,6 +398,9 @@ int main() {
   }
 
   fclose(fout);
+  // Remove temporary result file if exists
+  std::remove(ILP_RESULT_FILE);
+
   auto end = std::chrono::steady_clock::now();
   std::cout
       << std::chrono::duration_cast<std::chrono::seconds>(end - start).count()

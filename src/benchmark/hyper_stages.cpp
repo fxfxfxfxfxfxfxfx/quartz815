@@ -12,6 +12,8 @@
 
 using namespace quartz;
 
+constexpr int NUM_LOCAL_QUBITS = 28;
+
 // Extracted helper function to compute gate statistics and first unexecuted
 // gate
 static void compute_gate_statistics(
@@ -324,7 +326,6 @@ void get_hyper_q_stages(CircuitSeq *seq, int num_frozen_qubits, int num_q,
   fflush(fout);
 
   // then get stages in each hyper stage
-  int num_local_qubits = 28;
   std::unordered_set<int> prev_frozen_qubits;
   for (int i = 0; i < hyper_stages.size(); i++) {
     std::vector<std::vector<int>> stages;
@@ -335,11 +336,27 @@ void get_hyper_q_stages(CircuitSeq *seq, int num_frozen_qubits, int num_q,
     for (int j = 0; j < num_frozen_qubits; j++) {
       frozen_qubits.insert(hyper_stages[i][num_q - 1 - j]);
     }
-    get_stages_by_heuristics(seq, num_local_qubits, local_qubits, num_swaps,
+    get_stages_by_heuristics(seq, NUM_LOCAL_QUBITS, local_qubits, num_swaps,
                              executed_gates_per_stage[i], stages, frozen_qubits,
                              prev_frozen_qubits);
     prev_frozen_qubits = frozen_qubits;
   }
+}
+
+// Extracted function as requested
+void get_hyper_q_stages_native(CircuitSeq *seq, int num_frozen_qubits,
+                               int num_q, FILE *fout, Context *ctx) {
+  std::vector<std::vector<bool>> local_qubits_by_heuristics;
+  std::vector<std::vector<int>> hyper_stages;
+  std::vector<std::unordered_set<CircuitGate *>> executed_gates_per_stage;
+
+  // first get hyper stages
+  auto res = compute_qubit_layout_with_hyper_stage_heuristic(
+      *seq, NUM_LOCAL_QUBITS, 1, ctx);
+  fprintf(fout, "%d, ", (int)res.size());
+  fflush(fout);
+  fprintf(fout, "\n");
+  fflush(fout);
 }
 
 int main() {
@@ -350,7 +367,7 @@ int main() {
                GateType::x, GateType::ry, GateType::u2, GateType::u3,
                GateType::cx, GateType::cz, GateType::cp, GateType::swap,
                GateType::rz, GateType::p, GateType::ccx, GateType::rx});
-  FILE *fout = fopen("heuristic_result.csv", "w");
+  FILE *fout = fopen("hyper_stage_result.csv", "w");
   // 31 or 42 total qubits, 0-23 global qubits
   // std::vector<int> num_qubits = {28, 29, 28, 29, 31, 32, 33,
   // std::vector<int> num_qubits = {30, 32, 34, 36, 38, 40, 42, 44, 46, 48};
@@ -362,16 +379,25 @@ int main() {
   for (int i = 0; i <= 24; i++) {
     num_global_qubits.push_back(i);
   }
+
   for (int num_q : num_qubits) {
     // requires running test_remove_swap first
+    // auto seq = CircuitSeq::from_qasm_file(
+    //     &ctx, (std::string("./circuit/qiskit-random/rqc") + "_" +
+    //            std::to_string(num_q) + ".qasm"));
     auto seq = CircuitSeq::from_qasm_file(
-        &ctx, (std::string("./circuit/qiskit-random/rqc") + "_" +
-               std::to_string(num_q) + ".qasm"));
+        &ctx,
+        std::string(
+            "./circuit/MQTBench_29q/twolocalrandom_indep_qiskit_29.qasm"));
 
     fprintf(fout, "%d, ", num_q);
 
     // Call the extracted function
-    get_hyper_q_stages(seq.get(), num_frozen_qubits, num_q, fout);
+    get_hyper_q_stages_native(seq.get(), num_frozen_qubits, num_q, fout, &ctx);
+    // get_hyper_q_stages(seq.get(), num_frozen_qubits, num_q, fout);
+    auto res = compute_qubit_layout_with_ilp(*seq, NUM_LOCAL_QUBITS, 0, &ctx,
+                                             &interpreter, 3);
+    fprintf(fout, "%d", (int)res.size());
   }
 
   fclose(fout);

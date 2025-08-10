@@ -23,7 +23,8 @@
 using namespace quartz;
 
 // Timeout for ILP in seconds (change this value for testing)
-constexpr int ILP_TIMEOUT_SECONDS = 1;  // e.g., 10 seconds for testing
+// constexpr int ILP_TIMEOUT_SECONDS = 1;  // e.g., 1 second for testing
+constexpr int ILP_TIMEOUT_SECONDS = 2 * 60 * 60;  // 2 hours
 
 // Temporary file for process-based result passing
 const char *ILP_RESULT_FILE = "ilp_result.tmp";

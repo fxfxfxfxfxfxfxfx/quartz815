@@ -2695,11 +2695,19 @@ static bool update_executed_and_executable(
     }
     if (gate->gate->is_quantum_gate() && !executed[gate.get()]) {
       bool ok = true;  // indicates if the gate can be executed
+
+      // check if dependent gates are executed
       for (auto &output : gate->output_wires) {
         if (!executable[output->index]) {
           ok = false;
         }
       }
+
+      // diagonal gates can always be executed
+      // other wise, check if the target qubits are local
+      // if target qubits are local, the gate generally can be executed
+      // note that: for controlled gates, if only the control qubits are not
+      // local, it can still be executed
       if (!gate->gate->is_diagonal()) {
         int num_remaining_control_qubits = gate->gate->get_num_control_qubits();
         for (auto &output : gate->output_wires) {
@@ -2712,6 +2720,7 @@ static bool update_executed_and_executable(
           }
         }
       }
+
       if (ok) {
         // execute
         executed[gate.get()] = true;
@@ -2756,14 +2765,15 @@ static void get_stages_by_heuristics(
                             global_gates, first_unexecuted_gate);
 
     auto cmp = [&](int a, int b) {
+      // For the first iteration, we want to avoid frozen qubits become global
       if (iter == 0 && prev_frozen_qubits.count(a) &&
-          prev_frozen_qubits.count(b)) {
+          prev_frozen_qubits.count(b))
         return a < b;  // both are frozen, use index as tiebreaker
-      }
       if (iter == 0 && prev_frozen_qubits.count(a))
         return true;  // a is frozen, b is not, a comes first
       if (iter == 0 && prev_frozen_qubits.count(b))
         return false;  // b is frozen, a is not, b comes first
+      // For the first iteration, we want to avoid frozen qubits become global
 
       if (frozen_qubits.count(a) && frozen_qubits.count(b))
         return a < b;  // both are frozen, use index as tiebreaker

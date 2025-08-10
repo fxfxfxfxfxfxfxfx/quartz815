@@ -247,16 +247,16 @@ std::vector<Schedule> get_schedules_with_ilp(
  */
 std::vector<std::vector<int>> compute_qubit_layout_with_hyper_stage_heuristic(
     const CircuitSeq &sequence, int num_local_qubits, int num_frozen_qubits,
-    Context *ctx, PythonInterpreter *interpreter, int answer_start_with = 1);
+    Context *ctx);
 
 /**
  * Get schedules using the hyper-stage heuristic
  */
 std::vector<Schedule> get_schedules_with_hyper_stage_heuristic(
     const CircuitSeq &sequence, int num_local_qubits, int num_frozen_qubits,
-    const KernelCost &kernel_cost, Context *ctx, PythonInterpreter *interpreter,
-    bool attach_single_qubit_gates, int max_num_dp_states = 500,
-    const std::string &cache_file_name_prefix = "", int answer_start_with = 1);
+    const KernelCost &kernel_cost, Context *ctx, bool attach_single_qubit_gates,
+    int max_num_dp_states = 500,
+    const std::string &cache_file_name_prefix = "");
 
 /**
  * Verify the schedule by checking the well-formedness of each kernel and then

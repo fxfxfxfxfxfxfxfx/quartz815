@@ -23,7 +23,7 @@
 using namespace quartz;
 
 // Timeout for ILP in seconds (change this value for testing)
-constexpr int ILP_TIMEOUT_SECONDS = 10;  // e.g., 10 seconds for testing
+constexpr int ILP_TIMEOUT_SECONDS = 1;  // e.g., 10 seconds for testing
 
 // Temporary file for process-based result passing
 const char *ILP_RESULT_FILE = "ilp_result.tmp";
@@ -197,6 +197,7 @@ std::vector<std::vector<int>> read_ilp_result() {
 }
 
 // Helper function to run compute_qubit_layout_with_ilp in a separate process
+// group
 template <typename... Args>
 std::optional<std::vector<std::vector<int>>>
 run_with_timeout_process(std::chrono::seconds timeout, Args &&...args) {
@@ -209,12 +210,16 @@ run_with_timeout_process(std::chrono::seconds timeout, Args &&...args) {
     return std::nullopt;
   }
   if (pid == 0) {
-    // Child process
+    // Child process: set new process group
+    setpgid(0, 0);
     auto result = compute_qubit_layout_with_ilp(std::forward<Args>(args)...);
     write_ilp_result(result);
     _exit(0);
   } else {
     // Parent process
+    // Set process group for child (in case child hasn't called setpgid yet)
+    setpgid(pid, pid);
+
     int status = 0;
     int waited = 0;
     while (waited < timeout.count()) {
@@ -227,7 +232,8 @@ run_with_timeout_process(std::chrono::seconds timeout, Args &&...args) {
       }
     }
     if (waited >= timeout.count()) {
-      kill(pid, SIGKILL);
+      // Kill the entire process group
+      kill(-pid, SIGKILL);
       waitpid(pid, &status, 0);
       return std::nullopt;
     } else {

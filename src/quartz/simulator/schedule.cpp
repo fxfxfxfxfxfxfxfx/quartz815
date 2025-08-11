@@ -1,5 +1,6 @@
 #include "schedule.h"
 
+#include "hyperstage_dp.h"
 #include "quartz/pybind/pybind.h"
 #include "quartz/utils/string_utils.h"
 
@@ -7,6 +8,7 @@
 #include <deque>
 #include <filesystem>
 #include <optional>
+#include <pybind11/detail/internals.h>
 #include <queue>
 #include <stack>
 #include <unordered_set>
@@ -3016,6 +3018,32 @@ std::vector<std::vector<int>> compute_qubit_layout_with_hyper_stage_heuristic(
   return final_layout;
 }
 
+std::vector<std::vector<int>>
+compute_qubit_layout_with_hyper_stage_heuristic_dp(const CircuitSeq &sequence,
+                                                   int num_local_qubits,
+                                                   int num_frozen_qubits,
+                                                   Context *ctx) {
+  auto seq = const_cast<CircuitSeq *>(&sequence);
+  const int num_q = seq->get_num_qubits();
+
+  std::vector<std::vector<bool>> local_qubits_by_heuristics;
+  int num_swaps = 0;
+  std::vector<std::vector<int>> stages;
+  std::unordered_set<int> frozen_qubits;
+  std::unordered_set<int> prev_frozen_qubits;
+  std::unordered_set<CircuitGate *> gates;
+
+  // first get stages, each with num_local_qubits local qubits
+  get_stages_by_heuristics(seq, num_local_qubits, local_qubits_by_heuristics,
+                           num_swaps, gates, stages, frozen_qubits,
+                           prev_frozen_qubits);
+
+  auto final_stages =
+      optimize_stages(stages, num_local_qubits, num_frozen_qubits);
+
+  return final_stages;
+}
+
 std::vector<std::vector<int>> compute_qubit_layout_with_ilp(
     const CircuitSeq &sequence, int num_local_qubits, int num_regional_qubits,
     Context *ctx, PythonInterpreter *interpreter, int answer_start_with) {
@@ -3237,7 +3265,8 @@ std::vector<Schedule> get_schedules_with_ilp(
 std::vector<Schedule> get_schedules_with_hyper_stage_heuristic(
     const CircuitSeq &sequence, int num_local_qubits, int num_frozen_qubits,
     const KernelCost &kernel_cost, Context *ctx, bool attach_single_qubit_gates,
-    int max_num_dp_states, const std::string &cache_file_name_prefix) {
+    int max_num_dp_states, const std::string &cache_file_name_prefix,
+    bool use_dp) {
   if (std::filesystem::exists(cache_file_name_prefix + ".schedule")) {
     std::cout << "Use cached schedule " << cache_file_name_prefix << ".schedule"
               << std::endl;
@@ -3247,8 +3276,14 @@ std::vector<Schedule> get_schedules_with_hyper_stage_heuristic(
                          cache_file_name_prefix);
   }
   auto t_start = std::chrono::steady_clock::now();
-  auto qubit_layout = compute_qubit_layout_with_hyper_stage_heuristic(
-      sequence, num_local_qubits, num_frozen_qubits, ctx);
+  std::vector<std::vector<int>> qubit_layout;
+  if (use_dp) {
+    qubit_layout = compute_qubit_layout_with_hyper_stage_heuristic_dp(
+        sequence, num_local_qubits, num_frozen_qubits, ctx);
+  } else {
+    qubit_layout = compute_qubit_layout_with_hyper_stage_heuristic(
+        sequence, num_local_qubits, num_frozen_qubits, ctx);
+  }
   auto result = get_schedules(sequence, num_local_qubits, qubit_layout,
                               kernel_cost, ctx, attach_single_qubit_gates,
                               max_num_dp_states, cache_file_name_prefix);

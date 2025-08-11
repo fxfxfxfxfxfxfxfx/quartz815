@@ -378,8 +378,33 @@ void run_hyper_stage_partition(CircuitSeq *seq, int num_frozen_qubits,
   std::vector<std::vector<int>> hyper_stages;
   std::vector<std::unordered_set<CircuitGate *>> executed_gates_per_stage;
 
+  fprintf(fout, "%d, ", num_q);
+  std::cout << num_q << ", ";
   // first get hyper stages
   auto res = compute_qubit_layout_with_hyper_stage_heuristic(
+      *seq, NUM_LOCAL_QUBITS, 1, ctx);
+
+  // Use the new function to count hyper stages
+  int hyper_stage_count = count_hyper_stages_from_layout(res);
+  fprintf(fout, "%d, %d", hyper_stage_count, (int)res.size());
+  fflush(fout);
+  std::cout << hyper_stage_count << ", " << (int)res.size();
+  std::cout << std::endl;
+  fprintf(fout, "\n");
+  fflush(fout);
+}
+
+void run_hyper_stage_partition_dp(CircuitSeq *seq, int num_frozen_qubits,
+                                  int num_q, int NUM_LOCAL_QUBITS, FILE *fout,
+                                  Context *ctx) {
+  std::vector<std::vector<bool>> local_qubits_by_heuristics;
+  std::vector<std::vector<int>> hyper_stages;
+  std::vector<std::unordered_set<CircuitGate *>> executed_gates_per_stage;
+
+  fprintf(fout, "%d, ", num_q);
+  std::cout << num_q << ", ";
+  // first get hyper stages
+  auto res = compute_qubit_layout_with_hyper_stage_heuristic_dp(
       *seq, NUM_LOCAL_QUBITS, 1, ctx);
 
   // Use the new function to count hyper stages
@@ -463,12 +488,11 @@ int main(int argc, char *argv[]) {
 
   int num_q = seq->get_num_qubits();
 
-  fprintf(fout, "%d, ", num_q);
-  std::cout << num_q << ", ";
-
   // Call the extracted function
   run_hyper_stage_partition(seq.get(), num_frozen_qubits, num_q,
                             num_local_qubits, fout, &ctx);
+  run_hyper_stage_partition_dp(seq.get(), num_frozen_qubits, num_q,
+                               num_local_qubits, fout, &ctx);
 
   auto res = compute_qubit_layout_with_snuqs_heuristic(
       *seq, num_local_qubits + 1, num_frozen_qubits, &ctx);

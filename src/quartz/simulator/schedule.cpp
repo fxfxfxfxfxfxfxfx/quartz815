@@ -2691,7 +2691,10 @@ static bool update_executed_and_executable(
     std::vector<bool> &executable, const std::vector<bool> &local_qubit) {
   bool all_done = true;
   for (auto &gate : seq->gates) {
-    if (gates_in_hyperstage && gates_in_hyperstage->count(gate.get()) == 0) {
+    // If we are in a hyperstage with non-empty gates, we need to skip gates
+    // that are not in this hyperstage.
+    if (gates_in_hyperstage && !gates_in_hyperstage->empty() &&
+        gates_in_hyperstage->count(gate.get()) == 0) {
       continue;  // skip gates not in the hyperstage
     }
     if (gate->gate->is_quantum_gate() && !executed[gate.get()]) {

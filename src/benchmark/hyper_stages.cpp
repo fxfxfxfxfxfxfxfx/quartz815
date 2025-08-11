@@ -14,9 +14,6 @@
 
 using namespace quartz;
 
-// Remove constexpr, will be set by command line argument
-// constexpr int NUM_LOCAL_QUBITS = 28;
-
 // Function to parse the result of
 // compute_qubit_layout_with_hyper_stage_heuristic and count the number of hyper
 // stages by detecting changes in the last qubit id.
@@ -365,15 +362,18 @@ void get_hyper_q_stages(CircuitSeq *seq, int num_frozen_qubits, int num_q,
     num_stages += stages.size();
   }
 
+  // Write to file and stdout
   fprintf(fout, "%d, %d", (int)hyper_stages.size(), num_stages);
   fflush(fout);
+  std::cout << (int)hyper_stages.size() << ", " << num_stages;
+  std::cout << std::endl;
   fprintf(fout, "\n");
   fflush(fout);
 }
 
-// Extracted function as requested
-void get_hyperq_stages_native(CircuitSeq *seq, int num_frozen_qubits, int num_q,
-                              int NUM_LOCAL_QUBITS, FILE *fout, Context *ctx) {
+void run_hyper_stage_partition(CircuitSeq *seq, int num_frozen_qubits,
+                               int num_q, int NUM_LOCAL_QUBITS, FILE *fout,
+                               Context *ctx) {
   std::vector<std::vector<bool>> local_qubits_by_heuristics;
   std::vector<std::vector<int>> hyper_stages;
   std::vector<std::unordered_set<CircuitGate *>> executed_gates_per_stage;
@@ -386,6 +386,8 @@ void get_hyperq_stages_native(CircuitSeq *seq, int num_frozen_qubits, int num_q,
   int hyper_stage_count = count_hyper_stages_from_layout(res);
   fprintf(fout, "%d, %d", hyper_stage_count, (int)res.size());
   fflush(fout);
+  std::cout << hyper_stage_count << ", " << (int)res.size();
+  std::cout << std::endl;
   fprintf(fout, "\n");
   fflush(fout);
 }
@@ -409,7 +411,7 @@ int main(int argc, char *argv[]) {
                GateType::rz, GateType::p, GateType::ccx, GateType::rx});
 
   std::string qasm_file = "";
-  int NUM_LOCAL_QUBITS = -1;
+  int num_local_qubits = -1;
   int num_frozen_qubits = -1;
 
   // Parse command line arguments
@@ -417,7 +419,7 @@ int main(int argc, char *argv[]) {
     if (strcmp(argv[i], "-q") == 0 && i + 1 < argc) {
       qasm_file = argv[++i];
     } else if (strcmp(argv[i], "-l") == 0 && i + 1 < argc) {
-      NUM_LOCAL_QUBITS = std::stoi(argv[++i]);
+      num_local_qubits = std::stoi(argv[++i]);
     } else if (strcmp(argv[i], "-f") == 0 && i + 1 < argc) {
       num_frozen_qubits = std::stoi(argv[++i]);
     } else if (strcmp(argv[i], "-h") == 0) {
@@ -430,7 +432,7 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  if (qasm_file.empty() || NUM_LOCAL_QUBITS < 0 || num_frozen_qubits < 0) {
+  if (qasm_file.empty() || num_local_qubits < 0 || num_frozen_qubits < 0) {
     std::cerr << "Missing required arguments.\n";
     print_usage(argv[0]);
     return 1;
@@ -453,12 +455,22 @@ int main(int argc, char *argv[]) {
   int num_q = seq->get_num_qubits();
 
   fprintf(fout, "%d, ", num_q);
+  std::cout << num_q << ", ";
 
   // Call the extracted function
-  get_hyperq_stages_native(seq.get(), num_frozen_qubits, num_q,
-                           NUM_LOCAL_QUBITS, fout, &ctx);
-  // get_hyper_q_stages(seq.get(), num_frozen_qubits, num_q, NUM_LOCAL_QUBITS,
-  // fout);
+  run_hyper_stage_partition(seq.get(), num_frozen_qubits, num_q,
+                            num_local_qubits, fout, &ctx);
+
+  auto res = compute_qubit_layout_with_snuqs_heuristic(
+      *seq, num_local_qubits + 1, num_frozen_qubits, &ctx);
+  fprintf(fout, "%d, ", num_q);
+  fprintf(fout, "%d, ", (int)res.size());
+  fflush(fout);
+  std::cout << num_q << ", ";
+  std::cout << (int)res.size() << ", ";
+  std::cout << std::endl;
+  fprintf(fout, "\n");
+  fflush(fout);
 
   fclose(fout);
   auto end = std::chrono::steady_clock::now();

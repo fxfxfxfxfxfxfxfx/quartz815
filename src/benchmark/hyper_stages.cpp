@@ -373,19 +373,34 @@ void get_hyper_q_stages(CircuitSeq *seq, int num_frozen_qubits, int num_q,
 
 void run_hyper_stage_partition(CircuitSeq *seq, int num_frozen_qubits,
                                int num_q, int NUM_LOCAL_QUBITS, FILE *fout,
-                               Context *ctx) {
+                               Context *ctx, bool debug = false) {
   std::vector<std::vector<bool>> local_qubits_by_heuristics;
   std::vector<std::vector<int>> hyper_stages;
   std::vector<std::unordered_set<CircuitGate *>> executed_gates_per_stage;
 
-  fprintf(fout, "%d, ", num_q);
-  std::cout << num_q << ", ";
   // first get hyper stages
   auto res = compute_qubit_layout_with_hyper_stage_heuristic(
       *seq, NUM_LOCAL_QUBITS, 1, ctx);
 
+  // print frozen qubits
+  if (debug) {
+    std::cout << "Frozen qubits: ";
+    for (auto &stage : res) {
+      for (int i = 0; i < num_frozen_qubits; i++) {
+        std::cout << stage[num_q - 1 - i];
+        if (i < num_frozen_qubits - 1) {
+          std::cout << ", ";
+        }
+      }
+      std::cout << std::endl;
+    }
+  }
+
   // Use the new function to count hyper stages
   int hyper_stage_count = count_hyper_stages_from_layout(res);
+
+  fprintf(fout, "%d, ", num_q);
+  std::cout << num_q << ", ";
   fprintf(fout, "%d, %d", hyper_stage_count, (int)res.size());
   fflush(fout);
   std::cout << hyper_stage_count << ", " << (int)res.size();
@@ -494,25 +509,26 @@ int main(int argc, char *argv[]) {
   run_hyper_stage_partition_dp(seq.get(), num_frozen_qubits, num_q,
                                num_local_qubits, fout, &ctx);
 
-  auto res = compute_qubit_layout_with_snuqs_heuristic(
-      *seq, num_local_qubits + 1, num_frozen_qubits, &ctx);
+  int num_local_qubits_for_baseline = num_local_qubits + 1;
+  auto res_snuqs = compute_qubit_layout_with_snuqs_heuristic(
+      *seq, num_local_qubits_for_baseline, num_frozen_qubits, &ctx);
   fprintf(fout, "%d, ", num_q);
-  fprintf(fout, "%d, ", (int)res.size());
+  fprintf(fout, "%d, ", (int)res_snuqs.size());
   fflush(fout);
   std::cout << num_q << ", ";
-  std::cout << (int)res.size() << ", ";
+  std::cout << (int)res_snuqs.size() << ", ";
   std::cout << std::endl;
   fprintf(fout, "\n");
   fflush(fout);
 
   if (ilp) {
-    auto res_ilp = compute_qubit_layout_with_ilp(*seq, num_local_qubits + 1, 0,
-                                                 &ctx, &interpreter, 1);
+    auto res_ilp = compute_qubit_layout_with_ilp(
+        *seq, num_local_qubits_for_baseline, 0, &ctx, &interpreter, 1);
     fprintf(fout, "%d, ", num_q);
     fprintf(fout, "%d, ", (int)res_ilp.size());
     fflush(fout);
     std::cout << num_q << ", ";
-    std::cout << (int)res.size() << ", ";
+    std::cout << (int)res_snuqs.size() << ", ";
     std::cout << std::endl;
     fprintf(fout, "\n");
     fflush(fout);
@@ -520,11 +536,11 @@ int main(int argc, char *argv[]) {
 
   if (debug) {
     std::cout << "[DEBUG] SNUQS heuristic result:" << std::endl;
-    for (size_t i = 0; i < res.size(); ++i) {
+    for (size_t i = 0; i < res_snuqs.size(); ++i) {
       std::cout << "  Stage " << i << ": {";
-      for (size_t j = 0; j < res[i].size(); ++j) {
-        std::cout << res[i][j];
-        if (j + 1 < res[i].size())
+      for (size_t j = 0; j < res_snuqs[i].size(); ++j) {
+        std::cout << res_snuqs[i][j];
+        if (j + 1 < res_snuqs[i].size())
           std::cout << ", ";
       }
       std::cout << "}" << std::endl;

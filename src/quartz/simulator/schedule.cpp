@@ -2643,7 +2643,8 @@ compute_local_qubits_with_ilp(const CircuitSeq &sequence, int num_local_qubits,
 static void compute_gate_statistics(
     CircuitSeq *seq, const std::unordered_map<CircuitGate *, bool> &executed,
     const std::vector<bool> &local_qubit, std::vector<int> &local_gates,
-    std::vector<int> &global_gates, std::vector<bool> &first_unexecuted_gate) {
+    std::vector<int> &global_gates, std::vector<bool> &first_unexecuted_gate,
+    const std::unordered_set<CircuitGate *> *gates_in_hyperstage) {
   int num_qubits = seq->get_num_qubits();
   local_gates.assign(num_qubits, 0);
   global_gates.assign(num_qubits, 0);
@@ -2651,6 +2652,12 @@ static void compute_gate_statistics(
 
   bool first = true;
   for (auto &gate : seq->gates) {
+    // If we are in a hyperstage with non-empty gates, we need to skip gates
+    // that are not in this hyperstage.
+    if (gates_in_hyperstage && !gates_in_hyperstage->empty() &&
+        gates_in_hyperstage->count(gate.get()) == 0) {
+      continue;  // skip gates not in the hyperstage
+    }
     if (gate->gate->is_quantum_gate() && !executed.at(gate.get())) {
       bool local = true;
       if (!gate->gate->is_diagonal()) {
@@ -2768,7 +2775,8 @@ static void get_stages_by_heuristics(
     std::vector<bool> first_unexecuted_gate;
     std::vector<int> local_gates, global_gates;
     compute_gate_statistics(seq, executed, local_qubit, local_gates,
-                            global_gates, first_unexecuted_gate);
+                            global_gates, first_unexecuted_gate,
+                            &gates_in_hyperstage);
 
     auto cmp = [&](int a, int b) {
       // For the first iteration, we want to avoid frozen qubits become global
@@ -2827,7 +2835,8 @@ static void get_hyper_stages(
     CircuitSeq *seq, int num_frozen_qubits,
     std::vector<std::vector<bool>> &local_qubits, int &num_swaps,
     std::vector<std::vector<int>> &result,
-    std::vector<std::unordered_set<CircuitGate *>> &executed_gates_per_stage) {
+    std::vector<std::unordered_set<CircuitGate *>> &executed_gates_per_stage,
+    bool debug = false) {
   result.clear();
   executed_gates_per_stage.clear();
   int num_qubits = seq->get_num_qubits();
@@ -2852,7 +2861,7 @@ static void get_hyper_stages(
     std::vector<bool> first_unexecuted_gate;
     std::vector<int> local_gates, global_gates;
     compute_gate_statistics(seq, executed, local_qubit, local_gates,
-                            global_gates, first_unexecuted_gate);
+                            global_gates, first_unexecuted_gate, nullptr);
 
     auto cmp = [&](int a, int b) {
       if (first_unexecuted_gate[b])
@@ -2868,6 +2877,8 @@ static void get_hyper_stages(
       return a < b;
     };
     std::vector<int> candidate_indices(num_qubits, 0);
+
+    // Reset local_qubit to false to determine local qubits in this stage
     for (int i = 0; i < num_qubits; i++) {
       candidate_indices[i] = i;
       local_qubit[i] = false;
@@ -2912,6 +2923,20 @@ static void get_hyper_stages(
           for (auto &output : gate->output_wires) {
             executable_for_collect_gates[output->index] = false;
           }
+        }
+      }
+    }
+
+    if (debug) {
+      // Show output wires of executed gates in this hyper stage
+      if (!executed_this_stage.empty()) {
+        std::cout << "Hyper stage " << num_stages << " executed gates: ";
+        for (auto &gate : executed_this_stage) {
+          for (auto &output : gate->output_wires) {
+            if (output->is_qubit())
+              std::cout << output->index << " ";
+          }
+          std::cout << std::endl;
         }
       }
     }

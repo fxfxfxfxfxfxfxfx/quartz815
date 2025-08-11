@@ -399,6 +399,9 @@ void print_usage(const char *prog_name) {
   std::cout << "  -l <num_local_qubits>    Number of local qubits\n";
   std::cout << "  -f <num_frozen_qubits>   Number of frozen qubits\n";
   std::cout << "  -h                       Show this help message\n";
+  std::cout
+      << "  --debug                  Print debug info for SNUQS heuristic\n";
+  std::cout << "  --ilp                    Whether also run ILP\n";
 }
 
 int main(int argc, char *argv[]) {
@@ -413,6 +416,8 @@ int main(int argc, char *argv[]) {
   std::string qasm_file = "";
   int num_local_qubits = -1;
   int num_frozen_qubits = -1;
+  bool debug = false;
+  bool ilp = false;
 
   // Parse command line arguments
   for (int i = 1; i < argc; ++i) {
@@ -425,6 +430,10 @@ int main(int argc, char *argv[]) {
     } else if (strcmp(argv[i], "-h") == 0) {
       print_usage(argv[0]);
       return 0;
+    } else if (strcmp(argv[i], "--debug") == 0) {
+      debug = true;
+    } else if (strcmp(argv[i], "--ilp") == 0) {
+      ilp = true;
     } else {
       std::cerr << "Unknown or incomplete argument: " << argv[i] << std::endl;
       print_usage(argv[0]);
@@ -471,6 +480,32 @@ int main(int argc, char *argv[]) {
   std::cout << std::endl;
   fprintf(fout, "\n");
   fflush(fout);
+
+  if (ilp) {
+    auto res_ilp = compute_qubit_layout_with_ilp(*seq, num_local_qubits + 1, 0,
+                                                 &ctx, &interpreter, 1);
+    fprintf(fout, "%d, ", num_q);
+    fprintf(fout, "%d, ", (int)res_ilp.size());
+    fflush(fout);
+    std::cout << num_q << ", ";
+    std::cout << (int)res.size() << ", ";
+    std::cout << std::endl;
+    fprintf(fout, "\n");
+    fflush(fout);
+  }
+
+  if (debug) {
+    std::cout << "[DEBUG] SNUQS heuristic result:" << std::endl;
+    for (size_t i = 0; i < res.size(); ++i) {
+      std::cout << "  Stage " << i << ": {";
+      for (size_t j = 0; j < res[i].size(); ++j) {
+        std::cout << res[i][j];
+        if (j + 1 < res[i].size())
+          std::cout << ", ";
+      }
+      std::cout << "}" << std::endl;
+    }
+  }
 
   fclose(fout);
   auto end = std::chrono::steady_clock::now();

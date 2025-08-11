@@ -5,14 +5,17 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <iostream>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 using namespace quartz;
 
-constexpr int NUM_LOCAL_QUBITS = 28;
+// Remove constexpr, will be set by command line argument
+// constexpr int NUM_LOCAL_QUBITS = 28;
 
 // Function to parse the result of
 // compute_qubit_layout_with_hyper_stage_heuristic and count the number of hyper
@@ -328,7 +331,7 @@ void get_hyper_stages(
 // should use compute_qubit_layout_with_hyper_stage_heuristic in schedule.cpp
 // instead
 void get_hyper_q_stages(CircuitSeq *seq, int num_frozen_qubits, int num_q,
-                        FILE *fout) {
+                        int NUM_LOCAL_QUBITS, FILE *fout) {
   std::vector<std::vector<bool>> local_qubits_by_heuristics;
   int num_swaps = 0;
   std::vector<std::vector<int>> hyper_stages;
@@ -370,7 +373,7 @@ void get_hyper_q_stages(CircuitSeq *seq, int num_frozen_qubits, int num_q,
 
 // Extracted function as requested
 void get_hyperq_stages_native(CircuitSeq *seq, int num_frozen_qubits, int num_q,
-                              FILE *fout, Context *ctx) {
+                              int NUM_LOCAL_QUBITS, FILE *fout, Context *ctx) {
   std::vector<std::vector<bool>> local_qubits_by_heuristics;
   std::vector<std::vector<int>> hyper_stages;
   std::vector<std::unordered_set<CircuitGate *>> executed_gates_per_stage;
@@ -387,7 +390,16 @@ void get_hyperq_stages_native(CircuitSeq *seq, int num_frozen_qubits, int num_q,
   fflush(fout);
 }
 
-int main() {
+void print_usage(const char *prog_name) {
+  std::cout << "Usage: " << prog_name
+            << " -q <qasm_file> -l <num_local_qubits> -f <num_frozen_qubits>\n";
+  std::cout << "  -q <qasm_file>           Path to QASM file\n";
+  std::cout << "  -l <num_local_qubits>    Number of local qubits\n";
+  std::cout << "  -f <num_frozen_qubits>   Number of frozen qubits\n";
+  std::cout << "  -h                       Show this help message\n";
+}
+
+int main(int argc, char *argv[]) {
   auto start = std::chrono::steady_clock::now();
   init_python_interpreter();
   PythonInterpreter interpreter;
@@ -395,38 +407,58 @@ int main() {
                GateType::x, GateType::ry, GateType::u2, GateType::u3,
                GateType::cx, GateType::cz, GateType::cp, GateType::swap,
                GateType::rz, GateType::p, GateType::ccx, GateType::rx});
+
+  std::string qasm_file = "";
+  int NUM_LOCAL_QUBITS = -1;
+  int num_frozen_qubits = -1;
+
+  // Parse command line arguments
+  for (int i = 1; i < argc; ++i) {
+    if (strcmp(argv[i], "-q") == 0 && i + 1 < argc) {
+      qasm_file = argv[++i];
+    } else if (strcmp(argv[i], "-l") == 0 && i + 1 < argc) {
+      NUM_LOCAL_QUBITS = std::stoi(argv[++i]);
+    } else if (strcmp(argv[i], "-f") == 0 && i + 1 < argc) {
+      num_frozen_qubits = std::stoi(argv[++i]);
+    } else if (strcmp(argv[i], "-h") == 0) {
+      print_usage(argv[0]);
+      return 0;
+    } else {
+      std::cerr << "Unknown or incomplete argument: " << argv[i] << std::endl;
+      print_usage(argv[0]);
+      return 1;
+    }
+  }
+
+  if (qasm_file.empty() || NUM_LOCAL_QUBITS < 0 || num_frozen_qubits < 0) {
+    std::cerr << "Missing required arguments.\n";
+    print_usage(argv[0]);
+    return 1;
+  }
+
   FILE *fout = fopen("hyper_stage_result.csv", "w");
-  // 31 or 42 total qubits, 0-23 global qubits
-  // std::vector<int> num_qubits = {28, 29, 28, 29, 31, 32, 33,
-  std::vector<int> num_qubits = {30, 32, 34, 36, 38, 40, 42, 44, 46, 48};
-  // std::vector<int> num_qubits = {30};
-  // std::vector<int> num_qubits = {36};
-  int num_frozen_qubits = 1;
-  constexpr int kMaxGlobalQubitsFor31 = 16;
-  std::vector<int> num_global_qubits;
-  for (int i = 0; i <= 24; i++) {
-    num_global_qubits.push_back(i);
+  if (!fout) {
+    std::cerr << "Failed to open output file.\n";
+    return 1;
   }
 
-  for (int num_q : num_qubits) {
-    // requires running test_remove_swap first
-    auto seq = CircuitSeq::from_qasm_file(
-        &ctx, (std::string("./circuit/qiskit-random/rqc") + "_" +
-               std::to_string(num_q) + ".qasm"));
-    // auto seq = CircuitSeq::from_qasm_file(
-    //     &ctx,
-    //     std::string(
-    //         "./circuit/MQTBench_29q/twolocalrandom_indep_qiskit_29.qasm"));
-
-    fprintf(fout, "%d, ", num_q);
-
-    // Call the extracted function
-    get_hyperq_stages_native(seq.get(), num_frozen_qubits, num_q, fout, &ctx);
-    // get_hyper_q_stages(seq.get(), num_frozen_qubits, num_q, fout);
-    // auto res = compute_qubit_layout_with_ilp(*seq, NUM_LOCAL_QUBITS, 0, &ctx,
-    //                                          &interpreter, 3);
-    // fprintf(fout, "%d", (int)res.size());
+  // Load circuit from QASM file
+  auto seq = CircuitSeq::from_qasm_file(&ctx, qasm_file);
+  if (!seq) {
+    std::cerr << "Failed to load QASM file: " << qasm_file << std::endl;
+    fclose(fout);
+    return 1;
   }
+
+  int num_q = seq->get_num_qubits();
+
+  fprintf(fout, "%d, ", num_q);
+
+  // Call the extracted function
+  get_hyperq_stages_native(seq.get(), num_frozen_qubits, num_q,
+                           NUM_LOCAL_QUBITS, fout, &ctx);
+  // get_hyper_q_stages(seq.get(), num_frozen_qubits, num_q, NUM_LOCAL_QUBITS,
+  // fout);
 
   fclose(fout);
   auto end = std::chrono::steady_clock::now();

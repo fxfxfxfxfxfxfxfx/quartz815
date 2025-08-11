@@ -6,6 +6,7 @@
 #include <chrono>
 #include <deque>
 #include <filesystem>
+#include <optional>
 #include <queue>
 #include <stack>
 #include <unordered_set>
@@ -2920,6 +2921,60 @@ static void get_hyper_stages(
       }
     }
   }
+}
+
+std::vector<Schedule> get_schedules_with_snuqs_heuristic(
+    const CircuitSeq &sequence, int num_local_qubits, int num_frozen_qubits,
+    const KernelCost &kernel_cost, Context *ctx, bool attach_single_qubit_gates,
+    int max_num_dp_states, const std::string &cache_file_name_prefix) {
+  // In this method, num_frozen_qubits must be 0, otherwise print an error and
+  // exit.
+  if (num_frozen_qubits != 0) {
+    std::cerr << "Error: num_frozen_qubits must be 0 for SNUQS heuristic."
+              << std::endl;
+    exit(EXIT_FAILURE);
+  }
+
+  if (std::filesystem::exists(cache_file_name_prefix + ".schedule")) {
+    std::cout << "Use cached schedule " << cache_file_name_prefix << ".schedule"
+              << std::endl;
+    // cached
+    return get_schedules(sequence, num_local_qubits, {}, kernel_cost, ctx,
+                         attach_single_qubit_gates, max_num_dp_states,
+                         cache_file_name_prefix);
+  }
+  auto t_start = std::chrono::steady_clock::now();
+  auto qubit_layout = compute_qubit_layout_with_snuqs_heuristic(
+      sequence, num_local_qubits, num_frozen_qubits, ctx);
+  auto result = get_schedules(sequence, num_local_qubits, qubit_layout,
+                              kernel_cost, ctx, attach_single_qubit_gates,
+                              max_num_dp_states, cache_file_name_prefix);
+  auto t_end = std::chrono::steady_clock::now();
+  std::cout << "Computed and cached schedule " << cache_file_name_prefix
+            << ".schedule in "
+            << (double)std::chrono::duration_cast<std::chrono::milliseconds>(
+                   t_end - t_start)
+                       .count() /
+                   1000.0
+            << " seconds." << std::endl;
+  return result;
+}
+
+std::vector<std::vector<int>>
+compute_qubit_layout_with_snuqs_heuristic(const CircuitSeq &sequence,
+                                          int num_local_qubits,
+                                          int num_frozen_qubits, Context *ctx) {
+  std::vector<std::vector<int>> res;
+  std::vector<std::vector<bool>> local_qubits_by_heuristics;
+  int num_swaps = 0;
+  std::unordered_set<int> frozen_qubits;
+  std::unordered_set<int> prev_frozen_qubits;
+  std::unordered_set<CircuitGate *> gates;
+  auto seq = const_cast<CircuitSeq *>(&sequence);
+  get_stages_by_heuristics(seq, num_local_qubits, local_qubits_by_heuristics,
+                           num_swaps, gates, res, frozen_qubits,
+                           prev_frozen_qubits);
+  return res;
 }
 
 std::vector<std::vector<int>> compute_qubit_layout_with_hyper_stage_heuristic(

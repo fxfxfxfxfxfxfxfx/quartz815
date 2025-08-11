@@ -1,4 +1,3 @@
-import sys
 from qiskit.circuit.random.utils import random_circuit
 from qiskit import transpile
 import argparse

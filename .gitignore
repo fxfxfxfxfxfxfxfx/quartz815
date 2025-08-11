@@ -70,3 +70,6 @@ build/*
 
 # misc
 *.csv
+
+# HiGHS log
+HiGHS.log

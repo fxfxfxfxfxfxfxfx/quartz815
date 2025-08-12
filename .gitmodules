@@ -1,3 +1,6 @@
 [submodule "external/HiGHS"]
 	path = external/HiGHS
 	url = https://github.com/ERGO-Code/HiGHS.git
+[submodule "circuit/veriq-bench"]
+	path = circuit/veriq-bench
+	url = https://github.com/Veri-Q/Benchmark.git

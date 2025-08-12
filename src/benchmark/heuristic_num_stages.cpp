@@ -16,6 +16,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <thread>
+#include <tuple>
 #include <unistd.h>
 #include <unordered_map>
 #include <vector>
@@ -199,8 +200,9 @@ std::vector<std::vector<int>> read_ilp_result() {
 
 // Helper function to run compute_qubit_layout_with_ilp in a separate process
 // group
+// Now returns a tuple: (optional result, running time in seconds)
 template <typename... Args>
-std::optional<std::vector<std::vector<int>>>
+std::tuple<std::optional<std::vector<std::vector<int>>>, double>
 run_with_timeout_process(std::chrono::seconds timeout, Args &&...args) {
   // Remove old result file if exists
   std::remove(ILP_RESULT_FILE);
@@ -208,13 +210,16 @@ run_with_timeout_process(std::chrono::seconds timeout, Args &&...args) {
   pid_t pid = fork();
   if (pid < 0) {
     std::cerr << "fork() failed!" << std::endl;
-    return std::nullopt;
+    return std::make_tuple(std::nullopt, -1.0);
   }
   if (pid == 0) {
     // Child process: set new process group
     setpgid(0, 0);
+    auto child_start = std::chrono::steady_clock::now();
     auto result = compute_qubit_layout_with_ilp(std::forward<Args>(args)...);
     write_ilp_result(result);
+    auto child_end = std::chrono::steady_clock::now();
+    // Optionally, could write time to file, but not needed for parent
     _exit(0);
   } else {
     // Parent process
@@ -223,24 +228,32 @@ run_with_timeout_process(std::chrono::seconds timeout, Args &&...args) {
 
     int status = 0;
     int waited = 0;
+    auto parent_start = std::chrono::steady_clock::now();
+    bool finished = false;
     while (waited < timeout.count()) {
       pid_t result = waitpid(pid, &status, WNOHANG);
       if (result == 0) {
         sleep(1);
         ++waited;
       } else {
+        finished = true;
         break;
       }
     }
-    if (waited >= timeout.count()) {
+    auto parent_end = std::chrono::steady_clock::now();
+    double running_time =
+        std::chrono::duration_cast<std::chrono::duration<double>>(parent_end -
+                                                                  parent_start)
+            .count();
+    if (!finished) {
       // Kill the entire process group
       kill(-pid, SIGKILL);
       waitpid(pid, &status, 0);
-      return std::nullopt;
+      return std::make_tuple(std::nullopt, -1.0);
     } else {
       // Read result from file
       auto result = read_ilp_result();
-      return result;
+      return std::make_tuple(result, running_time);
     }
   }
 }
@@ -256,9 +269,10 @@ int main() {
   FILE *fout = fopen("heuristic_result.csv", "w");
   // 31 or 42 total qubits, 0-23 global qubits
   // std::vector<int> num_qubits = {28, 29, 28, 29, 31, 32, 33,
-  std::vector<int> num_qubits = {30, 32, 34, 36, 38, 40, 42, 44, 46, 48};
+  // std::vector<int> num_qubits = {30, 32, 34, 36, 38, 40, 42, 44, 46, 48};
+  std::vector<int> num_qubits = {26, 27, 28, 29, 30, 31, 32, 33};
   // std::vector<int> num_qubits = {30, 32};
-  int num_local_qubits = 28;
+  int num_local_qubits = 24;
 
   // Test staging by heuristics
   for (int num_q : num_qubits) {
@@ -310,11 +324,16 @@ int main() {
     int num_global_q = num_q - num_local_qubits;
 
     // Run compute_qubit_layout_with_ilp in a separate process with a timeout
-    std::optional<std::vector<std::vector<int>>> ilp_result_opt =
-        run_with_timeout_process(std::chrono::seconds(ILP_TIMEOUT_SECONDS),
-                                 *seq, num_local_qubits,
-                                 std::min(2, num_q - num_local_qubits), &ctx,
-                                 &interpreter, answer_start_with);
+    std::optional<std::vector<std::vector<int>>> ilp_result_opt;
+    double ilp_running_time = -1.0;
+    {
+      auto [result, running_time] = run_with_timeout_process(
+          std::chrono::seconds(ILP_TIMEOUT_SECONDS), *seq, num_local_qubits,
+          std::min(2, num_q - num_local_qubits), &ctx, &interpreter,
+          answer_start_with);
+      ilp_result_opt = result;
+      ilp_running_time = running_time;
+    }
 
     int ilp_result = -1;
     int num_swaps = 0;
@@ -346,6 +365,12 @@ int main() {
     }
     n_swaps.push_back(num_swaps);
     fprintf(fout, "%d, ", ilp_result);
+    // Write running time (if timeout, -1)
+    if (ilp_running_time < 0) {
+      fprintf(fout, "-1, ");
+    } else {
+      fprintf(fout, "%.6f, ", ilp_running_time);
+    }
     fflush(fout);
     answer_start_with = ilp_result;
     fprintf(fout, "\n");
@@ -363,10 +388,15 @@ int main() {
     int num_global_q = num_q - num_local_qubits;
 
     // Run compute_qubit_layout_with_ilp in a separate process with a timeout
-    std::optional<std::vector<std::vector<int>>> ilp_result_opt =
-        run_with_timeout_process(std::chrono::seconds(ILP_TIMEOUT_SECONDS),
-                                 *seq, num_q - 1, 0, &ctx, &interpreter,
-                                 answer_start_with);
+    std::optional<std::vector<std::vector<int>>> ilp_result_opt;
+    double ilp_running_time = -1.0;
+    {
+      auto [result, running_time] = run_with_timeout_process(
+          std::chrono::seconds(ILP_TIMEOUT_SECONDS), *seq, num_q - 1, 0, &ctx,
+          &interpreter, answer_start_with);
+      ilp_result_opt = result;
+      ilp_running_time = running_time;
+    }
 
     int ilp_result = -1;
     int num_swaps = 0;
@@ -398,6 +428,12 @@ int main() {
     }
     n_swaps.push_back(num_swaps);
     fprintf(fout, "%d, ", ilp_result);
+    // Write running time (if timeout, -1)
+    if (ilp_running_time < 0) {
+      fprintf(fout, "-1, ");
+    } else {
+      fprintf(fout, "%.2f, ", ilp_running_time);
+    }
     fflush(fout);
     answer_start_with = ilp_result;
     fprintf(fout, "\n");

@@ -1917,22 +1917,30 @@ get_schedules(const CircuitSeq &sequence, int num_local_qubits,
               const std::string &cache_file_name_prefix) {
   constexpr bool debug = false;
   std::vector<Schedule> result;
-  if (!cache_file_name_prefix.empty()) {
-    int num_stages;
-    std::ifstream fin(cache_file_name_prefix + ".schedule");
-    if (fin.is_open()) {
-      // use cached result
-      fin >> num_stages;
-      fin.close();
-      result.reserve(num_stages);
-      for (int i = 0; i < num_stages; i++) {
-        result.emplace_back(
-            Schedule::from_file(ctx, cache_file_name_prefix + ".stage" +
-                                         std::to_string(i) + ".schedule"));
-      }
-      return result;
+  std::cout << "qubit_layout before get schedule:" << std::endl;
+for (size_t i = 0; i < qubit_layout.size(); ++i) {
+    std::cout << "Row " << i << ": ";
+    for (size_t j = 0; j < qubit_layout[i].size(); ++j) {
+        std::cout << qubit_layout[i][j] << " ";
     }
-  }
+    std::cout << std::endl;
+}
+  // if (!cache_file_name_prefix.empty()) {
+  //   int num_stages;
+  //   std::ifstream fin(cache_file_name_prefix + ".schedule");
+  //   if (fin.is_open()) {
+  //     // use cached result
+  //     fin >> num_stages;
+  //     fin.close();
+  //     result.reserve(num_stages);
+  //     for (int i = 0; i < num_stages; i++) {
+  //       result.emplace_back(
+  //           Schedule::from_file(ctx, cache_file_name_prefix + ".stage" +
+  //                                        std::to_string(i) + ".schedule"));
+  //     }
+  //     return result;
+  //   }
+  // }
   result.reserve(qubit_layout.size());
   const int num_qubits = sequence.get_num_qubits();
   const int num_gates = sequence.get_num_gates();
@@ -2965,17 +2973,130 @@ std::vector<Schedule> get_schedules_with_snuqs_heuristic(
     exit(EXIT_FAILURE);
   }
 
-  if (std::filesystem::exists(cache_file_name_prefix + ".schedule")) {
-    std::cout << "Use cached schedule " << cache_file_name_prefix << ".schedule"
-              << std::endl;
-    // cached
-    return get_schedules(sequence, num_local_qubits, {}, kernel_cost, ctx,
-                         attach_single_qubit_gates, max_num_dp_states,
-                         cache_file_name_prefix);
-  }
+  // if (std::filesystem::exists(cache_file_name_prefix + ".schedule")) {
+  //   std::cout << "Use cached schedule " << cache_file_name_prefix << ".schedule"
+  //             << std::endl;
+  //   // cached
+  //   return get_schedules(sequence, num_local_qubits, {}, kernel_cost, ctx,
+  //                        attach_single_qubit_gates, max_num_dp_states,
+  //                        cache_file_name_prefix);
+  // }
   auto t_start = std::chrono::steady_clock::now();
   auto qubit_layout = compute_qubit_layout_with_snuqs_heuristic(
       sequence, num_local_qubits, num_frozen_qubits, ctx);
+
+  
+  const int num_qubits = sequence.get_num_qubits();
+  const int num_global_qubits = num_qubits - num_local_qubits - num_frozen_qubits;
+  std::vector<std::vector<int>> result_layout;
+  result_layout.reserve(qubit_layout.size());
+  for (const auto &current_stage : qubit_layout) {
+    std::vector<bool> is_local(num_qubits, false);
+    std::vector<bool> is_global(num_qubits, false);
+
+    for (int i = 0; i < num_local_qubits; i++) {
+      is_local[current_stage[i]] = true;
+    }
+    for (int i = num_qubits - num_global_qubits; i < num_qubits; i++) {
+      is_global[current_stage[i]] = true;
+    }
+
+    if (result_layout.empty()) {
+      // first stage
+      result_layout.emplace_back(current_stage);
+      continue;
+    }
+    auto &previous_layout = result_layout.back();
+    std::vector<int> current_stage_layout = previous_layout;
+    std::deque<int> non_local_to_local_swaps;
+    for (int i = num_qubits - 1; i >= num_qubits - num_global_qubits; i--) {
+      if (is_local[previous_layout[i]]) {
+        // global-local swap
+        non_local_to_local_swaps.push_front(i);
+      }
+    }
+    for (int i = num_qubits - num_global_qubits - 1; i >= num_local_qubits;
+         i--) {
+      if (is_local[previous_layout[i]]) {
+        // regional-local swap
+        non_local_to_local_swaps.push_front(i);
+      }
+    }
+
+    // Find non-intersecting swaps to approximate the qubit set change.
+    int swap_loc_min = num_local_qubits - (int)non_local_to_local_swaps.size();
+    int swap_loc_max = num_local_qubits - 1;
+    while (swap_loc_min <= swap_loc_max) {
+      // Find the next non-local qubit that is already in the swap region.
+      // If the lowest one should be global but the highest one should be
+      // regional, swap them.
+      while (swap_loc_min <= swap_loc_max &&
+             !is_global[current_stage_layout[swap_loc_min]]) {
+        swap_loc_min++;
+      }
+      while (swap_loc_min <= swap_loc_max &&
+             (is_local[current_stage_layout[swap_loc_max]] ||
+              is_global[current_stage_layout[swap_loc_max]])) {
+        swap_loc_max--;
+      }
+      if (swap_loc_min <= swap_loc_max) {
+        assert(swap_loc_min != swap_loc_max);
+        std::swap(current_stage_layout[swap_loc_min],
+                  current_stage_layout[swap_loc_max]);
+        swap_loc_min++;
+        swap_loc_max--;
+      }
+    }
+    swap_loc_min = num_local_qubits - (int)non_local_to_local_swaps.size();
+    swap_loc_max = num_local_qubits - 1;
+    std::deque<int> remaining_local_swap_locations;
+    for (int i = swap_loc_min; i <= swap_loc_max; i++) {
+      if (is_local[current_stage_layout[i]]) {
+        // These local qubits needs to be swapped out from these most
+        // significant bits.
+        remaining_local_swap_locations.push_back(i);
+      }
+    }
+    for (int i = 0; i < swap_loc_min; i++) {
+      if (!is_local[current_stage_layout[i]]) {
+        if (is_global[current_stage_layout[i]]) {
+          // local-global swap, swap as far as possible
+          std::swap(
+              current_stage_layout[i],
+              current_stage_layout[remaining_local_swap_locations.back()]);
+          remaining_local_swap_locations.pop_back();
+        } else {
+          // local-regional swap, swap as close as possible
+          std::swap(
+              current_stage_layout[i],
+              current_stage_layout[remaining_local_swap_locations.front()]);
+          remaining_local_swap_locations.pop_front();
+        }
+      }
+    }
+    // Perform the local-to-non-local swaps.
+    for (int i = swap_loc_min; i <= swap_loc_max; i++) {
+      std::swap(
+          current_stage_layout[i],
+          current_stage_layout[non_local_to_local_swaps[i - swap_loc_min]]);
+    }
+    // Check if the approximation is good.
+    int num_global_qubits_not_global = 0;
+    for (int i = num_qubits - num_global_qubits; i < num_qubits; i++) {
+      if (!is_global[current_stage_layout[i]]) {
+        num_global_qubits_not_global++;
+      }
+    }
+    if (num_global_qubits_not_global > 0) {
+      std::cerr << num_global_qubits_not_global
+                << " qubits cannot become global efficiently in this stage."
+                << std::endl;
+    }
+    assert((int)current_stage_layout.size() == num_qubits);
+    result_layout.emplace_back(std::move(current_stage_layout));
+  }
+
+
   auto result = get_schedules(sequence, num_local_qubits, qubit_layout,
                               kernel_cost, ctx, attach_single_qubit_gates,
                               max_num_dp_states, cache_file_name_prefix);
@@ -3261,14 +3382,14 @@ std::vector<Schedule> get_schedules_with_ilp(
     const KernelCost &kernel_cost, Context *ctx, PythonInterpreter *interpreter,
     bool attach_single_qubit_gates, int max_num_dp_states,
     const std::string &cache_file_name_prefix, int answer_start_with) {
-  if (std::filesystem::exists(cache_file_name_prefix + ".schedule")) {
-    std::cout << "Use cached schedule " << cache_file_name_prefix << ".schedule"
-              << std::endl;
-    // cached
-    return get_schedules(sequence, num_local_qubits, {}, kernel_cost, ctx,
-                         attach_single_qubit_gates, max_num_dp_states,
-                         cache_file_name_prefix);
-  }
+  // if (std::filesystem::exists(cache_file_name_prefix + ".schedule")) {
+  //   std::cout << "Use cached schedule " << cache_file_name_prefix << ".schedule"
+  //             << std::endl;
+  //   // cached
+  //   return get_schedules(sequence, num_local_qubits, {}, kernel_cost, ctx,
+  //                        attach_single_qubit_gates, max_num_dp_states,
+  //                        cache_file_name_prefix);
+  // }
   auto t_start = std::chrono::steady_clock::now();
   auto qubit_layout = compute_qubit_layout_with_ilp(
       sequence, num_local_qubits, num_regional_qubits, ctx, interpreter,
@@ -3292,14 +3413,14 @@ std::vector<Schedule> get_schedules_with_hyper_stage_heuristic(
     const KernelCost &kernel_cost, Context *ctx, bool attach_single_qubit_gates,
     int max_num_dp_states, const std::string &cache_file_name_prefix,
     bool use_dp) {
-  if (std::filesystem::exists(cache_file_name_prefix + ".schedule")) {
-    std::cout << "Use cached schedule " << cache_file_name_prefix << ".schedule"
-              << std::endl;
-    // cached
-    return get_schedules(sequence, num_local_qubits, {}, kernel_cost, ctx,
-                         attach_single_qubit_gates, max_num_dp_states,
-                         cache_file_name_prefix);
-  }
+  // if (std::filesystem::exists(cache_file_name_prefix + ".schedule")) {
+  //   std::cout << "Use cached schedule " << cache_file_name_prefix << ".schedule"
+  //             << std::endl;
+  //   // cached
+  //   return get_schedules(sequence, num_local_qubits, {}, kernel_cost, ctx,
+  //                        attach_single_qubit_gates, max_num_dp_states,
+  //                        cache_file_name_prefix);
+  // }
   auto t_start = std::chrono::steady_clock::now();
   std::vector<std::vector<int>> qubit_layout;
   if (use_dp) {
@@ -3309,7 +3430,131 @@ std::vector<Schedule> get_schedules_with_hyper_stage_heuristic(
     qubit_layout = compute_qubit_layout_with_hyper_stage_heuristic(
         sequence, num_local_qubits, num_frozen_qubits, ctx);
   }
-  auto result = get_schedules(sequence, num_local_qubits, qubit_layout,
+  for (auto &row : qubit_layout) {
+    if (row.size() < num_local_qubits + num_frozen_qubits) {
+        std::cerr << "Error: row size is smaller than expected.\n";
+        continue;
+    }
+
+    std::vector<int> frozen_tail(row.end() - num_frozen_qubits, row.end());
+
+    row.erase(row.end() - num_frozen_qubits, row.end());
+
+    row.insert(row.begin() + num_local_qubits, frozen_tail.begin(), frozen_tail.end());
+  }
+
+  const int num_qubits = sequence.get_num_qubits();
+  const int num_global_qubits = num_qubits - num_local_qubits - num_frozen_qubits;
+  std::vector<std::vector<int>> result_layout;
+  result_layout.reserve(qubit_layout.size());
+  for (const auto &current_stage : qubit_layout) {
+    std::vector<bool> is_local(num_qubits, false);
+    std::vector<bool> is_global(num_qubits, false);
+
+    for (int i = 0; i < num_local_qubits; i++) {
+      is_local[current_stage[i]] = true;
+    }
+    for (int i = num_qubits - num_global_qubits; i < num_qubits; i++) {
+      is_global[current_stage[i]] = true;
+    }
+
+    if (result_layout.empty()) {
+      // first stage
+      result_layout.emplace_back(current_stage);
+      continue;
+    }
+    auto &previous_layout = result_layout.back();
+    std::vector<int> current_stage_layout = previous_layout;
+    std::deque<int> non_local_to_local_swaps;
+    for (int i = num_qubits - 1; i >= num_qubits - num_global_qubits; i--) {
+      if (is_local[previous_layout[i]]) {
+        // global-local swap
+        non_local_to_local_swaps.push_front(i);
+      }
+    }
+    for (int i = num_qubits - num_global_qubits - 1; i >= num_local_qubits;
+         i--) {
+      if (is_local[previous_layout[i]]) {
+        // regional-local swap
+        non_local_to_local_swaps.push_front(i);
+      }
+    }
+
+    // Find non-intersecting swaps to approximate the qubit set change.
+    int swap_loc_min = num_local_qubits - (int)non_local_to_local_swaps.size();
+    int swap_loc_max = num_local_qubits - 1;
+    while (swap_loc_min <= swap_loc_max) {
+      // Find the next non-local qubit that is already in the swap region.
+      // If the lowest one should be global but the highest one should be
+      // regional, swap them.
+      while (swap_loc_min <= swap_loc_max &&
+             !is_global[current_stage_layout[swap_loc_min]]) {
+        swap_loc_min++;
+      }
+      while (swap_loc_min <= swap_loc_max &&
+             (is_local[current_stage_layout[swap_loc_max]] ||
+              is_global[current_stage_layout[swap_loc_max]])) {
+        swap_loc_max--;
+      }
+      if (swap_loc_min <= swap_loc_max) {
+        assert(swap_loc_min != swap_loc_max);
+        std::swap(current_stage_layout[swap_loc_min],
+                  current_stage_layout[swap_loc_max]);
+        swap_loc_min++;
+        swap_loc_max--;
+      }
+    }
+    swap_loc_min = num_local_qubits - (int)non_local_to_local_swaps.size();
+    swap_loc_max = num_local_qubits - 1;
+    std::deque<int> remaining_local_swap_locations;
+    for (int i = swap_loc_min; i <= swap_loc_max; i++) {
+      if (is_local[current_stage_layout[i]]) {
+        // These local qubits needs to be swapped out from these most
+        // significant bits.
+        remaining_local_swap_locations.push_back(i);
+      }
+    }
+    for (int i = 0; i < swap_loc_min; i++) {
+      if (!is_local[current_stage_layout[i]]) {
+        if (is_global[current_stage_layout[i]]) {
+          // local-global swap, swap as far as possible
+          std::swap(
+              current_stage_layout[i],
+              current_stage_layout[remaining_local_swap_locations.back()]);
+          remaining_local_swap_locations.pop_back();
+        } else {
+          // local-regional swap, swap as close as possible
+          std::swap(
+              current_stage_layout[i],
+              current_stage_layout[remaining_local_swap_locations.front()]);
+          remaining_local_swap_locations.pop_front();
+        }
+      }
+    }
+    // Perform the local-to-non-local swaps.
+    for (int i = swap_loc_min; i <= swap_loc_max; i++) {
+      std::swap(
+          current_stage_layout[i],
+          current_stage_layout[non_local_to_local_swaps[i - swap_loc_min]]);
+    }
+    // Check if the approximation is good.
+    int num_global_qubits_not_global = 0;
+    for (int i = num_qubits - num_global_qubits; i < num_qubits; i++) {
+      if (!is_global[current_stage_layout[i]]) {
+        num_global_qubits_not_global++;
+      }
+    }
+    if (num_global_qubits_not_global > 0) {
+      std::cerr << num_global_qubits_not_global
+                << " qubits cannot become global efficiently in this stage."
+                << std::endl;
+    }
+    assert((int)current_stage_layout.size() == num_qubits);
+    result_layout.emplace_back(std::move(current_stage_layout));
+  }
+
+
+  auto result = get_schedules(sequence, num_local_qubits, result_layout,
                               kernel_cost, ctx, attach_single_qubit_gates,
                               max_num_dp_states, cache_file_name_prefix);
   auto t_end = std::chrono::steady_clock::now();

@@ -3097,7 +3097,7 @@ std::vector<Schedule> get_schedules_with_snuqs_heuristic(
   }
 
 
-  auto result = get_schedules(sequence, num_local_qubits, qubit_layout,
+  auto result = get_schedules(sequence, num_local_qubits, result_layout,
                               kernel_cost, ctx, attach_single_qubit_gates,
                               max_num_dp_states, cache_file_name_prefix);
   auto t_end = std::chrono::steady_clock::now();
